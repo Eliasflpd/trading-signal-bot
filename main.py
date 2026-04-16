@@ -74,7 +74,7 @@ def send_telegram(message):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         print("[WARN] Token ou Chat ID nao configurados.")
         return False
-    url  = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
+    url  = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     resp = requests.post(url, data=data, timeout=10)
     return resp.status_code == 200
@@ -82,22 +82,16 @@ def send_telegram(message):
 
 def build_message(direction, label, rsi, trend, bb_status, confidence):
     if direction == "CALL":
-        icon   = "U0001f7e2"
-        action = "➡️ Abra IQ Option → clique ACIMA ▲"
+        icon   = "CALL"
+        action = "-> Abra IQ Option -> clique ACIMA ^"
     else:
-        icon   = "U0001f534"
-        action = "➡️ Abra IQ Option → clique ABAIXO ▼"
-    return (
-        f"{icon} <b>{direction} — {label}</b>
-"
-        f"⏱ Expiracao: 1 minuto
-"
-        f"U0001f4ca RSI: {rsi} | Tendencia: {trend} | BB: {bb_status}
-"
-        f"U0001f4aa Confianca: {confidence}%
-"
-        f"{action}"
-    )
+        icon   = "PUT"
+        action = "-> Abra IQ Option -> clique ABAIXO v"
+    line1 = icon + " <b>" + direction + " - " + label + "</b>"
+    line2 = "Expiracao: 1 minuto"
+    line3 = "RSI: " + str(rsi) + " | Tendencia: " + trend + " | BB: " + bb_status
+    line4 = "Confianca: " + str(confidence) + "%"
+    return line1 + "\n" + line2 + "\n" + line3 + "\n" + line4 + "\n" + action
 
 
 def analyze(symbol, closes):
@@ -142,12 +136,12 @@ def main():
                 last = last_signal_time.get(symbol, 0)
                 if now - last < COOLDOWN:
                     remaining = int(COOLDOWN - (now - last))
-                    print(f"[{ts}] {symbol} em cooldown ({remaining}s)")
+                    print("[" + ts + "] " + symbol + " em cooldown (" + str(remaining) + "s)")
                     continue
                 closes = get_candles(symbol)
                 if not closes:
                     continue
-                print(f"[{ts}] {symbol} preco: {closes[-1]}")
+                print("[" + ts + "] " + symbol + " preco: " + str(closes[-1]))
                 signal = analyze(symbol, closes)
                 if signal:
                     msg = build_message(
@@ -158,15 +152,15 @@ def main():
                     ok = send_telegram(msg)
                     if ok:
                         last_signal_time[symbol] = now
-                        print(f"[{ts}] Sinal {signal['direction']} enviado para {label}")
+                        print("[" + ts + "] Sinal " + signal["direction"] + " enviado para " + label)
                     else:
-                        print(f"[{ts}] Falha ao enviar no Telegram")
+                        print("[" + ts + "] Falha ao enviar no Telegram")
                 else:
-                    print(f"[{ts}] {symbol} sem confluencia")
+                    print("[" + ts + "] " + symbol + " sem confluencia")
             except requests.exceptions.RequestException as e:
-                print(f"[{ts}] Erro de rede ({symbol}): {e}")
+                print("[" + ts + "] Erro de rede (" + symbol + "): " + str(e))
             except Exception as e:
-                print(f"[{ts}] Erro inesperado ({symbol}): {e}")
+                print("[" + ts + "] Erro inesperado (" + symbol + "): " + str(e))
         try:
             time.sleep(CHECK_INTERVAL)
         except Exception:
@@ -179,5 +173,5 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         print("Bot encerrado.")
     except Exception as e:
-        print(f"Erro critico: {e}")
+        print("Erro critico: " + str(e))
         time.sleep(10)
