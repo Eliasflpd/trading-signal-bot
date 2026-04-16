@@ -186,7 +186,7 @@ def get_updates(offset=0):
 
 # -- Mensagens de sinal ----------------------------------------------------
 
-SEP = "━━━━━━━━━━━━━━━"
+SEP = "âââââââââââââââ"
 
 
 def build_signal_message(sig, entry=10):
@@ -198,26 +198,26 @@ def build_signal_message(sig, entry=10):
     pat    = sig["pattern"]
     conf   = sig["confidence"]
     if d == "CALL":
-        header = "U0001f7e2 <b>CALL — " + label + "</b>"
-        action = "➡️ IQ Option → <b>ACIMA ▲</b>"
+        header = "U0001f7e2 <b>CALL â " + label + "</b>"
+        action = "â¡ï¸ IQ Option â <b>ACIMA â²</b>"
     else:
-        header = "U0001f534 <b>PUT — " + label + "</b>"
-        action = "➡️ IQ Option → <b>ABAIXO ▼</b>"
+        header = "U0001f534 <b>PUT â " + label + "</b>"
+        action = "â¡ï¸ IQ Option â <b>ABAIXO â¼</b>"
     pat_line = ""
     if pat != "Nenhum":
-        pat_line = "U0001f56f <b>Padrão:</b> <i>" + pat + "</i>\n"
+        pat_line = "U0001f56f <b>PadrÃ£o:</b> <i>" + pat + "</i>\n"
     return (
         header + "\n"
         + SEP + "\n"
-        + "⏱ <b>Expiração:</b> 1 minuto\n"
+        + "â± <b>ExpiraÃ§Ã£o:</b> 1 minuto\n"
         + "U0001f4ca <b>RSI:</b> " + str(rsi)
         + " | <b>MACD:</b> " + macd_t
         + " | <b>Stoch:</b> " + str(stoch) + "\n"
         + pat_line
-        + "U0001f4aa <b>Confiança:</b> " + str(conf) + "%\n"
+        + "U0001f4aa <b>ConfianÃ§a:</b> " + str(conf) + "%\n"
         + "U0001f4b0 <b>Entrada:</b> $" + str(entry) + "\n"
         + SEP + "\n"
-        + "⏰ <b>Você tem 50 segundos para entrar!</b>\n"
+        + "â° <b>VocÃª tem 50 segundos para entrar!</b>\n"
         + action
     )
 
@@ -226,12 +226,12 @@ def build_warning_message(sig):
     d     = sig["direction"]
     label = sig["label"]
     if d == "CALL":
-        action = "➡️ IQ Option → <b>ACIMA ▲</b>"
+        action = "â¡ï¸ IQ Option â <b>ACIMA â²</b>"
     else:
-        action = "➡️ IQ Option → <b>ABAIXO ▼</b>"
+        action = "â¡ï¸ IQ Option â <b>ABAIXO â¼</b>"
     return (
-        "⚡ <b>ÚLTIMO AVISO — " + label + " " + d + "</b>\n"
-        + "⏰ <b>20 segundos! Entra agora ou perde!</b>\n"
+        "â¡ <b>ÃLTIMO AVISO â " + label + " " + d + "</b>\n"
+        + "â° <b>20 segundos! Entra agora ou perde!</b>\n"
         + action
     )
 
@@ -305,9 +305,9 @@ def run_analysis(symbol, label, forced=False, target_chat=None):
         )
         if forced and target_chat:
             dir_str = "Sem direcao"
-            if call_pts >= 4:
+            if call_pts >= 3:
                 dir_str = "CALL forte (" + str(call_pts) + "/6)"
-            elif put_pts >= 4:
+            elif put_pts >= 3:
                 dir_str = "PUT forte (" + str(put_pts) + "/6)"
             elif call_pts > put_pts:
                 dir_str = "Leve CALL (" + str(call_pts) + "/6)"
@@ -325,12 +325,12 @@ def run_analysis(symbol, label, forced=False, target_chat=None):
                 "Pontos: CALL=" + str(call_pts) + "/6 PUT=" + str(put_pts) + "/6"
             )
             send_telegram(target_chat, msg)
-        if call_pts >= 4:
+        if call_pts >= 3:
             conf = min(65 + call_pts * 3 + pat_bonus * 5 + (5 if rsi < 30 else 0), 95)
             return dict(direction="CALL", label=label, symbol=symbol,
                         rsi=rsi, macd_trend=macd_t, stoch_k=stoch_k,
                         pattern=pattern, confidence=conf)
-        if put_pts >= 4:
+        if put_pts >= 3:
             conf = min(65 + put_pts * 3 + pat_bonus * 5 + (5 if rsi > 70 else 0), 95)
             return dict(direction="PUT", label=label, symbol=symbol,
                         rsi=rsi, macd_trend=macd_t, stoch_k=stoch_k,
@@ -361,8 +361,8 @@ def handle_command(text, chat_id):
             "U0001f4cc <b>Ativos:</b> BTC, ETH, SOL, XRP\n"
             "U0001f4ca <b>Indicadores:</b> RSI - EMA - BB - MACD - Stochastic\n"
             "U0001f56f <b>Padroes:</b> Martelo, Engolfo, Estrela Cadente\n"
-            "⏰ Sinal enviado 50s antes do fechamento da vela!\n"
-            "✅ Confluencia minima: 4 de 6 indicadores."
+            "â° Sinal enviado 50s antes do fechamento da vela!\n"
+            "â Confluencia minima: 3 de 6 indicadores."
         )
         send_telegram(chat_id, msg)
     elif text == "/status":
@@ -378,7 +378,7 @@ def handle_command(text, chat_id):
             lines.append(lbl + ": " + status)
         msg = (
             "U0001f916 <b>Bot ATIVO</b>\n"
-            "⏱ Uptime: " + str(h) + "h " + str(m) + "m\n"
+            "â± Uptime: " + str(h) + "h " + str(m) + "m\n"
             "U0001f517 API: KuCoin | Ciclo: " + str(CHECK_INTERVAL) + "s\n"
             "U0001f55b Proxima vela em: " + str(int(secs)) + "s\n\n"
             + "\n".join(lines)
@@ -389,7 +389,7 @@ def handle_command(text, chat_id):
         for symbol, label in SYMBOLS.items():
             run_analysis(symbol, label, forced=True, target_chat=chat_id)
     else:
-        send_telegram(chat_id, "❓ Use /start, /status ou /sinal")
+        send_telegram(chat_id, "â Use /start, /status ou /sinal")
 
 
 # -- Polling thread --------------------------------------------------------
