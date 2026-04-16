@@ -9,14 +9,25 @@ from datetime import datetime
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-KUCOIN_BASE = "https://api.kucoin.com/api/v1/market/candles"
+KUCOIN_BASE  = "https://api.kucoin.com/api/v1/market/candles"
+YAHOO_BASE   = "https://query1.finance.yahoo.com/v8/finance/chart/"
 
-SYMBOLS = {
+# KuCoin crypto pairs
+CRYPTO_SYMBOLS = {
     "BTC-USDT": "BTC/USD OTC",
     "ETH-USDT": "ETH/USD OTC",
     "SOL-USDT": "SOL/USD OTC",
     "XRP-USDT": "XRP/USD OTC",
 }
+
+# Yahoo Finance forex pairs (IQ Option OTC)
+FOREX_SYMBOLS = {
+    "EURUSD=X": "EURUSD OTC",
+    "GBPUSD=X": "GBPUSD OTC",
+    "EURGBP=X": "EURGBP OTC",
+}
+
+SYMBOLS = {**CRYPTO_SYMBOLS, **FOREX_SYMBOLS}
 
 CHECK_INTERVAL = 60
 COOLDOWN       = 300
@@ -42,100 +53,113 @@ start_time       = datetime.utcnow()
 def calculate_rsi(closes, period=RSI_PERIOD):
     if len(closes) < period + 1:
         return 50.0
-    deltas   = [closes[i] - closes[i-1] for i in range(1, len(closes))]
-    gains    = [d if d > 0 else 0.0 for d in deltas]
-    losses   = [-d if d < 0 else 0.0 for d in deltas]
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
-    for i in range(period, len(gains)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    gains, losses = [], []
+    for i in range(1, period + 1):
+        diff = closes[-period - 1 + i] - closes[-period - 1 + i - 1]
+        if diff >= 0:
+            gains.append(diff)
+            losses.append(0)
+        else:
+            gains.append(0)
+            losses.append(-diff)
+    avg_gain = sum(gains) / period
+    avg_loss = sum(losses) / period
+    for i in range(len(closes) - period, len(closes)):
+        diff = closes[i] - closes[i - 1]
+        g = diff if diff > 0 else 0
+        l = -diff if diff < 0 else 0
+        avg_gain = (avg_gain * (period - 1) + g) / period
+        avg_loss = (avg_loss * (period - 1) + l) / period
     if avg_loss == 0:
         return 100.0
-    return round(100 - (100 / (1 + avg_gain / avg_loss)), 2)
+    rs = avg_gain / avg_loss
+    return round(100 - 100 / (1 + rs), 2)
 
 
 def calculate_ema(closes, period):
     if len(closes) < period:
         return closes[-1]
-    k   = 2 / (period + 1)
+    k = 2 / (period + 1)
     ema = sum(closes[:period]) / period
-    for p in closes[period:]:
-        ema = p * k + ema * (1 - k)
-    return round(ema, 8)
+    for price in closes[period:]:
+        ema = price * k + ema * (1 - k)
+    return round(ema, 6)
 
 
 def calculate_bollinger(closes, period=BB_PERIOD, std_mult=BB_STD):
     if len(closes) < period:
-        v = closes[-1]
-        return v, v, v
-    window   = closes[-period:]
-    middle   = sum(window) / period
-    variance = sum((x - middle) ** 2 for x in window) / period
-    std      = math.sqrt(variance)
-    return (
-        round(middle + std_mult * std, 8),
-        round(middle, 8),
-        round(middle - std_mult * std, 8),
-    )
+        return closes[-1], closes[-1], closes[-1]
+    window = closes[-period:]
+    mean   = sum(window) / period
+    std    = math.sqrt(sum((x - mean) ** 2 for x in window) / period)
+    return round(mean + std_mult * std, 6), round(mean, 6), round(mean - std_mult * std, 6)
 
 
 def calculate_macd(closes, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
     if len(closes) < slow + signal:
-        return 0.0, 0.0, "Neutro"
-    macd_values = []
-    for i in range(slow, len(closes) + 1):
-        ef = calculate_ema(closes[:i], fast)
-        es = calculate_ema(closes[:i], slow)
-        macd_values.append(ef - es)
-    if len(macd_values) < signal:
-        return 0.0, 0.0, "Neutro"
-    macd_line   = macd_values[-1]
-    signal_line = calculate_ema(macd_values, signal)
-    histogram   = macd_line - signal_line
-    trend = "Alta" if histogram > 0 else ("Baixa" if histogram < 0 else "Neutro")
-    return round(macd_line, 8), round(signal_line, 8), trend
+        return 0, 0, "Neutro"
+    ema_fast   = calculate_ema(closes, fast)
+    ema_slow   = calculate_ema(closes, slow)
+    macd_line  = ema_fast - ema_slow
+    macd_vals  = [calculate_ema(closes[:i], fast) - calculate_ema(closes[:i], slow)
+                  for i in range(slow, len(closes) + 1)]
+    signal_val = calculate_ema(macd_vals, signal) if len(macd_vals) >= signal else macd_line
+    trend      = "Alta" if macd_line > signal_val else "Baixa"
+    return round(macd_line, 6), round(signal_val, 6), trend
 
 
-def calculate_stochastic(highs, lows, closes, k_period=STOCH_K, d_period=STOCH_D):
-    if len(closes) < k_period:
+def calculate_stochastic(highs, lows, closes, k=STOCH_K, smooth=STOCH_SMOOTH):
+    if len(closes) < k:
         return 50.0, 50.0
-    k_values = []
-    for i in range(k_period - 1, len(closes)):
-        h_max = max(highs[i - k_period + 1: i + 1])
-        l_min = min(lows[i - k_period + 1: i + 1])
-        if h_max == l_min:
-            k_values.append(50.0)
+    window_h = highs[-k:]
+    window_l = lows[-k:]
+    highest  = max(window_h)
+    lowest   = min(window_l)
+    if highest == lowest:
+        raw_k = 50.0
+    else:
+        raw_k = 100 * (closes[-1] - lowest) / (highest - lowest)
+    stoch_k_vals = []
+    for i in range(k, len(closes) + 1):
+        h = max(highs[i - k:i])
+        l = min(lows[i - k:i])
+        if h == l:
+            stoch_k_vals.append(50.0)
         else:
-            k_values.append(100 * (closes[i] - l_min) / (h_max - l_min))
-    k_smooth = sum(k_values[-STOCH_SMOOTH:]) / STOCH_SMOOTH if len(k_values) >= STOCH_SMOOTH else k_values[-1]
-    d_line   = sum(k_values[-d_period:]) / d_period if len(k_values) >= d_period else k_smooth
-    return round(k_smooth, 2), round(d_line, 2)
+            stoch_k_vals.append(100 * (closes[i - 1] - l) / (h - l))
+    stoch_d = sum(stoch_k_vals[-smooth:]) / smooth if len(stoch_k_vals) >= smooth else raw_k
+    return round(raw_k, 2), round(stoch_d, 2)
 
 
 def detect_candle_pattern(opens, highs, lows, closes):
-    if len(closes) < 2:
+    if len(closes) < 3:
         return "Nenhum"
     o1, h1, l1, c1 = opens[-2], highs[-2], lows[-2], closes[-2]
     o2, h2, l2, c2 = opens[-1], highs[-1], lows[-1], closes[-1]
-    body2         = abs(c2 - o2)
-    range2        = (h2 - l2) if h2 != l2 else 0.0001
-    lower_shadow2 = min(o2, c2) - l2
-    upper_shadow2 = h2 - max(o2, c2)
-    if body2 / range2 < 0.35 and lower_shadow2 >= 2 * body2 and upper_shadow2 <= body2:
-        return "Martelo"
-    if body2 / range2 < 0.35 and upper_shadow2 >= 2 * body2 and lower_shadow2 <= body2:
-        return "Estrela Cadente"
-    if c1 < o1 and c2 > o2 and c2 > o1 and o2 < c1:
+    body1  = abs(c1 - o1)
+    body2  = abs(c2 - o2)
+    range1 = h1 - l1 if h1 != l1 else 0.0001
+    range2 = h2 - l2 if h2 != l2 else 0.0001
+    # Engolfo de Alta
+    if c2 > o2 and c1 < o1 and c2 > o1 and o2 < c1:
         return "Engolfo de Alta"
-    if c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1:
+    # Engolfo de Baixa
+    if c2 < o2 and c1 > o1 and c2 < o1 and o2 > c1:
         return "Engolfo de Baixa"
+    # Martelo
+    lower_shadow2 = (min(o2, c2) - l2)
+    upper_shadow2 = (h2 - max(o2, c2))
+    if (lower_shadow2 > 2 * body2 and upper_shadow2 < body2 * 0.5 and body2 / range2 < 0.4):
+        return "Martelo"
+    # Estrela Cadente
+    if (upper_shadow2 > 2 * body2 and lower_shadow2 < body2 * 0.5 and body2 / range2 < 0.4):
+        return "Estrela Cadente"
     return "Nenhum"
 
 
-# -- KuCoin API ------------------------------------------------------------
+# -- Dados de mercado -------------------------------------------------------
 
-def get_candles_full(symbol, interval="1min", limit=120):
+def get_candles_kucoin(symbol, interval="1min", limit=120):
     params = {"symbol": symbol, "type": interval}
     resp   = requests.get(KUCOIN_BASE, params=params, timeout=10)
     resp.raise_for_status()
@@ -152,10 +176,53 @@ def get_candles_full(symbol, interval="1min", limit=120):
     return opens, highs, lows, closes
 
 
+def get_candles_yahoo(symbol, limit=120):
+    url     = YAHOO_BASE + symbol
+    params  = {"interval": "1m", "range": "1d"}
+    headers = {"User-Agent": "Mozilla/5.0"}
+    resp    = requests.get(url, params=params, headers=headers, timeout=10)
+    resp.raise_for_status()
+    data    = resp.json()
+    result  = data["chart"]["result"][0]
+    ohlcv   = result["indicators"]["quote"][0]
+    opens_raw  = ohlcv["open"]
+    highs_raw  = ohlcv["high"]
+    lows_raw   = ohlcv["low"]
+    closes_raw = ohlcv["close"]
+    opens, highs, lows, closes = [], [], [], []
+    for i in range(len(closes_raw)):
+        if (opens_raw[i] is not None and highs_raw[i] is not None
+                and lows_raw[i] is not None and closes_raw[i] is not None):
+            opens.append(float(opens_raw[i]))
+            highs.append(float(highs_raw[i]))
+            lows.append(float(lows_raw[i]))
+            closes.append(float(closes_raw[i]))
+    return opens[-limit:], highs[-limit:], lows[-limit:], closes[-limit:]
+
+
+def get_candles_full(symbol, limit=120):
+    if symbol in FOREX_SYMBOLS:
+        return get_candles_yahoo(symbol, limit)
+    return get_candles_kucoin(symbol, limit=limit)
+
+
 def seconds_to_next_candle():
     now = datetime.utcnow()
     elapsed = now.second + now.microsecond / 1_000_000
     return 60.0 - elapsed
+
+
+# -- Expiração recomendada --------------------------------------------------
+
+def get_expiration(rsi, stoch_k, pattern):
+    strong_patterns = ["Engolfo de Alta", "Engolfo de Baixa", "Estrela Cadente"]
+    if stoch_k < 20 or stoch_k > 80:
+        return "1 minuto"
+    if pattern in strong_patterns:
+        return "1 minuto"
+    if rsi < 30 or rsi > 70:
+        return "2 minutos"
+    return "5 minutos"
 
 
 # -- Telegram --------------------------------------------------------------
@@ -179,15 +246,13 @@ def get_updates(offset=0):
     try:
         resp = requests.get(url, params=params, timeout=10)
         return resp.json().get("result", [])
-    except Exception as e:
-        print("Erro getUpdates: " + str(e))
+    except Exception:
         return []
 
 
-# -- Mensagens de sinal ----------------------------------------------------
+# -- Mensagens -------------------------------------------------------------
 
-SEP = "âââââââââââââââ"
-
+SEP = "━━━━━━━━━━━━━━━"
 
 def build_signal_message(sig, entry=10):
     d      = sig["direction"]
@@ -197,27 +262,28 @@ def build_signal_message(sig, entry=10):
     stoch  = sig["stoch_k"]
     pat    = sig["pattern"]
     conf   = sig["confidence"]
+    expir  = get_expiration(rsi, stoch, pat)
     if d == "CALL":
-        header = "U0001f7e2 <b>CALL â " + label + "</b>"
-        action = "â¡ï¸ IQ Option â <b>ACIMA â²</b>"
+        header = "U0001f7e2 <b>CALL — " + label + "</b>"
+        action = "➡️ IQ Option → <b>ACIMA ▲</b>"
     else:
-        header = "U0001f534 <b>PUT â " + label + "</b>"
-        action = "â¡ï¸ IQ Option â <b>ABAIXO â¼</b>"
+        header = "U0001f534 <b>PUT — " + label + "</b>"
+        action = "➡️ IQ Option → <b>ABAIXO ▼</b>"
     pat_line = ""
     if pat != "Nenhum":
-        pat_line = "U0001f56f <b>PadrÃ£o:</b> <i>" + pat + "</i>\n"
+        pat_line = "U0001f56f <b>Padrão:</b> <i>" + pat + "</i>\n"
     return (
         header + "\n"
         + SEP + "\n"
-        + "â± <b>ExpiraÃ§Ã£o:</b> 1 minuto\n"
+        + "⏱ <b>Expiração recomendada:</b> " + expir + "\n"
         + "U0001f4ca <b>RSI:</b> " + str(rsi)
         + " | <b>MACD:</b> " + macd_t
         + " | <b>Stoch:</b> " + str(stoch) + "\n"
         + pat_line
-        + "U0001f4aa <b>ConfianÃ§a:</b> " + str(conf) + "%\n"
+        + "U0001f4aa <b>Confiança:</b> " + str(conf) + "%\n"
         + "U0001f4b0 <b>Entrada:</b> $" + str(entry) + "\n"
         + SEP + "\n"
-        + "â° <b>VocÃª tem 50 segundos para entrar!</b>\n"
+        + "⏰ <b>Você tem 50 segundos para entrar!</b>\n"
         + action
     )
 
@@ -226,12 +292,12 @@ def build_warning_message(sig):
     d     = sig["direction"]
     label = sig["label"]
     if d == "CALL":
-        action = "â¡ï¸ IQ Option â <b>ACIMA â²</b>"
+        action = "➡️ IQ Option → <b>ACIMA ▲</b>"
     else:
-        action = "â¡ï¸ IQ Option â <b>ABAIXO â¼</b>"
+        action = "➡️ IQ Option → <b>ABAIXO ▼</b>"
     return (
-        "â¡ <b>ÃLTIMO AVISO â " + label + " " + d + "</b>\n"
-        + "â° <b>20 segundos! Entra agora ou perde!</b>\n"
+        "⚡ <b>ÚLTIMO AVISO — " + label + " " + d + "</b>\n"
+        + "⏰ <b>20 segundos! Entra agora ou perde!</b>\n"
         + action
     )
 
@@ -258,10 +324,16 @@ def run_analysis(symbol, label, forced=False, target_chat=None):
         price                       = closes[-1]
         call_pts = 0
         put_pts  = 0
-        if rsi < 35:
+        pat_bonus = 0
+        # RSI
+        rsi_lbl = "Neutro"
+        if rsi < 30:
             call_pts += 1
-        elif rsi > 65:
+            rsi_lbl = "Sobrevendido"
+        elif rsi > 70:
             put_pts += 1
+            rsi_lbl = "Sobrecomprado"
+        # EMA
         ema_trend = "Neutro"
         if ema9 > ema21:
             call_pts += 1
@@ -269,29 +341,31 @@ def run_analysis(symbol, label, forced=False, target_chat=None):
         elif ema9 < ema21:
             put_pts += 1
             ema_trend = "Baixa"
+        # Bollinger Bands
         bb_status = "Neutro"
-        if price < bb_lower:
+        if closes[-1] <= bb_lower:
             call_pts += 1
-            bb_status = "Sobrevendido"
-        elif price > bb_upper:
+            bb_status = "Abaixo da banda"
+        elif closes[-1] >= bb_upper:
             put_pts += 1
-            bb_status = "Sobrecomprado"
+            bb_status = "Acima da banda"
+        # MACD
         if macd_t == "Alta":
             call_pts += 1
         elif macd_t == "Baixa":
             put_pts += 1
+        # Stochastic
         if stoch_k < 20:
             call_pts += 1
         elif stoch_k > 80:
             put_pts += 1
-        pat_bonus = 0
-        if pattern in ("Martelo", "Engolfo de Alta"):
+        # Candle pattern
+        if pattern in ("Engolfo de Alta", "Martelo"):
             call_pts += 1
             pat_bonus = 1
-        elif pattern in ("Estrela Cadente", "Engolfo de Baixa"):
+        elif pattern in ("Engolfo de Baixa", "Estrela Cadente"):
             put_pts += 1
             pat_bonus = 1
-        rsi_lbl = "sobrevendido" if rsi < 35 else ("sobrecomprado" if rsi > 65 else "neutro")
         print(
             "[" + ts + "] " + symbol +
             " P:" + str(round(price, 4)) +
@@ -358,52 +432,51 @@ def handle_command(text, chat_id):
             "/start - Boas-vindas\n"
             "/status - Uptime e cooldowns\n"
             "/sinal - Analise imediata de todos os ativos\n\n"
-            "U0001f4cc <b>Ativos:</b> BTC, ETH, SOL, XRP\n"
+            "U0001f4cc <b>Ativos (7):</b> BTC, ETH, SOL, XRP, EURUSD, GBPUSD, EURGBP\n"
             "U0001f4ca <b>Indicadores:</b> RSI - EMA - BB - MACD - Stochastic\n"
             "U0001f56f <b>Padroes:</b> Martelo, Engolfo, Estrela Cadente\n"
-            "â° Sinal enviado 50s antes do fechamento da vela!\n"
-            "â Confluencia minima: 3 de 6 indicadores."
+            "⏰ Sinal enviado 50s antes do fechamento da vela!\n"
+            "✅ Confluencia minima: 3 de 6 indicadores.\n"
+            "⏱ Expiracao dinamica: 1, 2 ou 5 minutos conforme forca do sinal."
         )
         send_telegram(chat_id, msg)
     elif text == "/status":
         uptime = datetime.utcnow() - start_time
         h = int(uptime.total_seconds() // 3600)
         m = int((uptime.total_seconds() % 3600) // 60)
-        now  = time.time()
-        secs = seconds_to_next_candle()
-        lines = []
-        for sym, lbl in SYMBOLS.items():
-            diff   = now - last_signal_time.get(sym, 0)
-            status = "cooldown " + str(int(COOLDOWN - diff)) + "s" if diff < COOLDOWN else "pronto"
-            lines.append(lbl + ": " + status)
-        msg = (
-            "U0001f916 <b>Bot ATIVO</b>\n"
-            "â± Uptime: " + str(h) + "h " + str(m) + "m\n"
-            "U0001f517 API: KuCoin | Ciclo: " + str(CHECK_INTERVAL) + "s\n"
-            "U0001f55b Proxima vela em: " + str(int(secs)) + "s\n\n"
-            + "\n".join(lines)
-        )
-        send_telegram(chat_id, msg)
+        now = time.time()
+        lines = ["<b>Status do Bot</b>", "Uptime: " + str(h) + "h " + str(m) + "m", ""]
+        for symbol, label in SYMBOLS.items():
+            last = last_signal_time.get(symbol, 0)
+            if last == 0:
+                lines.append(label + ": aguardando sinal")
+            else:
+                remaining = int(COOLDOWN - (now - last))
+                if remaining > 0:
+                    lines.append(label + ": cooldown " + str(remaining) + "s")
+                else:
+                    lines.append(label + ": pronto")
+        send_telegram(chat_id, "\n".join(lines))
     elif text == "/sinal":
-        send_telegram(chat_id, "U0001f50d Analisando " + str(len(SYMBOLS)) + " ativos... aguarde.")
+        send_telegram(chat_id, "U0001f50d Analisando 7 ativos...")
         for symbol, label in SYMBOLS.items():
             run_analysis(symbol, label, forced=True, target_chat=chat_id)
     else:
-        send_telegram(chat_id, "â Use /start, /status ou /sinal")
+        send_telegram(chat_id, "Comando desconhecido. Use /start, /status ou /sinal.")
 
 
-# -- Polling thread --------------------------------------------------------
+# -- Polling ---------------------------------------------------------------
 
 def polling_loop():
     global last_update_id
-    print("Polling de comandos iniciado (2s).")
+    print("Polling Telegram iniciado.")
     while True:
         try:
             updates = get_updates(offset=last_update_id + 1)
             for upd in updates:
                 last_update_id = upd.get("update_id", last_update_id)
-                msg     = upd.get("message", {})
-                text    = msg.get("text", "")
+                msg  = upd.get("message", {})
+                text = msg.get("text", "")
                 chat_id = msg.get("chat", {}).get("id")
                 if text and chat_id and text.startswith("/"):
                     handle_command(text, chat_id)
@@ -438,14 +511,13 @@ def signal_loop():
                 secs_left = seconds_to_next_candle()
             if secs_left < 5:
                 ts2 = datetime.utcnow().strftime("%H:%M:%S")
-                print("[" + ts2 + "] " + symbol + " - vela ja fechando, aguardando proxima")
-                time.sleep(secs_left + 2)
+                print("[" + ts2 + "] " + symbol + " janela perdida, pulando")
                 continue
-            ts2 = datetime.utcnow().strftime("%H:%M:%S")
-            msg_principal = build_signal_message(sig)
-            ok = send_telegram(TELEGRAM_CHAT_ID, msg_principal)
+            ts2   = datetime.utcnow().strftime("%H:%M:%S")
+            msg_s = build_signal_message(sig)
+            ok    = send_telegram(TELEGRAM_CHAT_ID, msg_s)
             if ok:
-                last_signal_time[symbol] = now
+                last_signal_time[symbol] = time.time()
                 print("[" + ts2 + "] Sinal " + sig["direction"] + " -> " + label + " (50s para fechar)")
             else:
                 print("[" + ts2 + "] Falha Telegram no sinal principal")
@@ -467,11 +539,12 @@ def signal_loop():
 # -- Main ------------------------------------------------------------------
 
 def main():
-    print("Bot IQ Option v4 iniciado!")
-    print("API: KuCoin | Ativos: " + str(list(SYMBOLS.keys())))
+    print("Bot IQ Option v5 iniciado!")
+    print("API: KuCoin (crypto) + Yahoo Finance (forex) | Ativos: " + str(list(SYMBOLS.keys())))
     print("Indicadores: RSI + EMA + BB + MACD + Stoch + Padroes")
     print("Ciclo: " + str(CHECK_INTERVAL) + "s | Cooldown: " + str(COOLDOWN) + "s")
     print("Timing: sinal 50s antes do fechamento da vela")
+    print("Expiracao: dinamica (1, 2 ou 5 minutos)")
     t = threading.Thread(target=polling_loop, daemon=True)
     t.start()
     signal_loop()
