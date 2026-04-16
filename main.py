@@ -5,17 +5,18 @@ import requests
 import threading
 from datetime import datetime
 
-# ── Configuracoes ─────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-BYBIT_BASE = "https://api.bybit.com/v5/market/kline"
+# API Kucoin — publica, sem restricao geografica, suporta klines
+KUCOIN_BASE = "https://api.kucoin.com/api/v1/market/candles"
 
 SYMBOLS = {
-    "BTCUSDT": "BTC/USD OTC",
-    "ETHUSDT": "ETH/USD OTC",
-    "GBPUSDT": "GBP/USD OTC",
-    "SOLUSDT": "SOL/USD OTC",
+    "BTC-USDT": "BTC/USD OTC",
+    "ETH-USDT": "ETH/USD OTC",
+    "SOL-USDT": "SOL/USD OTC",
+    "XRP-USDT": "XRP/USD OTC",
 }
 
 CHECK_INTERVAL = 60
@@ -73,31 +74,27 @@ def calculate_bollinger(closes, period=BB_PERIOD, std_mult=BB_STD):
     middle   = sum(window) / period
     variance = sum((x - middle) ** 2 for x in window) / period
     std      = math.sqrt(variance)
-    return round(middle + std_mult * std, 8), round(middle, 8), round(middle - std_mult * std, 8)
+    return (
+        round(middle + std_mult * std, 8),
+        round(middle, 8),
+        round(middle - std_mult * std, 8),
+    )
 
 
 def calculate_macd(closes, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
     if len(closes) < slow + signal:
         return 0.0, 0.0, "Neutro"
-    ema_fast   = calculate_ema(closes, fast)
-    ema_slow   = calculate_ema(closes, slow)
-    macd_line  = ema_fast - ema_slow
-    # Calcula linha de sinal como EMA do MACD sobre janela disponivel
     macd_values = []
     for i in range(slow, len(closes) + 1):
         ef = calculate_ema(closes[:i], fast)
         es = calculate_ema(closes[:i], slow)
         macd_values.append(ef - es)
     if len(macd_values) < signal:
-        return round(macd_line, 8), 0.0, "Neutro"
+        return 0.0, 0.0, "Neutro"
+    macd_line   = macd_values[-1]
     signal_line = calculate_ema(macd_values, signal)
     histogram   = macd_line - signal_line
-    if histogram > 0:
-        trend = "Alta"
-    elif histogram < 0:
-        trend = "Baixa"
-    else:
-        trend = "Neutro"
+    trend = "Alta" if histogram > 0 else ("Baixa" if histogram < 0 else "Neutro")
     return round(macd_line, 8), round(signal_line, 8), trend
 
 
@@ -106,84 +103,55 @@ def calculate_stochastic(highs, lows, closes, k_period=STOCH_K, d_period=STOCH_D
         return 50.0, 50.0
     k_values = []
     for i in range(k_period - 1, len(closes)):
-        high_max = max(highs[i - k_period + 1: i + 1])
-        low_min  = min(lows[i  - k_period + 1: i + 1])
-        if high_max == low_min:
+        h_max = max(highs[i - k_period + 1: i + 1])
+        l_min = min(lows[i  - k_period + 1: i + 1])
+        if h_max == l_min:
             k_values.append(50.0)
         else:
-            k_values.append(100 * (closes[i] - low_min) / (high_max - low_min))
-    # Suaviza K com media movel simples de STOCH_SMOOTH periodos
-    if len(k_values) >= STOCH_SMOOTH:
-        k_smooth = sum(k_values[-STOCH_SMOOTH:]) / STOCH_SMOOTH
-    else:
-        k_smooth = k_values[-1]
-    # D e a media de K
-    if len(k_values) >= d_period:
-        d_line = sum(k_values[-d_period:]) / d_period
-    else:
-        d_line = k_smooth
+            k_values.append(100 * (closes[i] - l_min) / (h_max - l_min))
+    k_smooth = sum(k_values[-STOCH_SMOOTH:]) / STOCH_SMOOTH if len(k_values) >= STOCH_SMOOTH else k_values[-1]
+    d_line   = sum(k_values[-d_period:]) / d_period if len(k_values) >= d_period else k_smooth
     return round(k_smooth, 2), round(d_line, 2)
 
 
 def detect_candle_pattern(opens, highs, lows, closes):
     if len(closes) < 2:
         return "Nenhum"
-    # Vela atual e anterior
     o1, h1, l1, c1 = opens[-2], highs[-2], lows[-2], closes[-2]
     o2, h2, l2, c2 = opens[-1], highs[-1], lows[-1], closes[-1]
-    body1  = abs(c1 - o1)
-    body2  = abs(c2 - o2)
-    range1 = h1 - l1 if h1 != l1 else 0.0001
-    range2 = h2 - l2 if h2 != l2 else 0.0001
-
-    # Martelo: corpo pequeno no topo, sombra inferior longa (bullish)
+    body2         = abs(c2 - o2)
+    range2        = (h2 - l2) if h2 != l2 else 0.0001
     lower_shadow2 = min(o2, c2) - l2
     upper_shadow2 = h2 - max(o2, c2)
-    if (body2 / range2 < 0.35 and
-            lower_shadow2 >= 2 * body2 and
-            upper_shadow2 <= body2):
+
+    if body2 / range2 < 0.35 and lower_shadow2 >= 2 * body2 and upper_shadow2 <= body2:
         return "Martelo"
-
-    # Estrela cadente: corpo pequeno no fundo, sombra superior longa (bearish)
-    if (body2 / range2 < 0.35 and
-            upper_shadow2 >= 2 * body2 and
-            lower_shadow2 <= body2):
+    if body2 / range2 < 0.35 and upper_shadow2 >= 2 * body2 and lower_shadow2 <= body2:
         return "Estrela Cadente"
-
-    # Engolfo de Alta: vela anterior bearish, atual bullish e engolfa
-    if (c1 < o1 and c2 > o2 and
-            c2 > o1 and o2 < c1):
+    if c1 < o1 and c2 > o2 and c2 > o1 and o2 < c1:
         return "Engolfo de Alta"
-
-    # Engolfo de Baixa: vela anterior bullish, atual bearish e engolfa
-    if (c1 > o1 and c2 < o2 and
-            c2 < o1 and o2 > c1):
+    if c1 > o1 and c2 < o2 and c2 < o1 and o2 > c1:
         return "Engolfo de Baixa"
-
     return "Nenhum"
 
 
-# ── Bybit API ─────────────────────────────────────────────────────
+# ── KuCoin API ────────────────────────────────────────────────────
 
-def get_candles_full(symbol, interval="1", limit=120):
-    params = {
-        "category": "linear",
-        "symbol":   symbol,
-        "interval": interval,
-        "limit":    limit,
-    }
-    resp = requests.get(BYBIT_BASE, params=params, timeout=10)
+def get_candles_full(symbol, interval="1min", limit=120):
+    # KuCoin retorna [timestamp, open, close, high, low, volume, turnover]
+    params = {"symbol": symbol, "type": interval}
+    resp   = requests.get(KUCOIN_BASE, params=params, timeout=10)
     resp.raise_for_status()
     data = resp.json()
-    if data.get("retCode") != 0:
-        raise Exception("Bybit: " + str(data.get("retMsg")))
-    candles = data["result"]["list"]
-    candles.reverse()
-    # [timestamp, open, high, low, close, volume, turnover]
+    if data.get("code") != "200000":
+        raise Exception("KuCoin: " + str(data.get("msg", "erro desconhecido")))
+    candles = data["data"]
+    candles.reverse()  # mais antigo primeiro
+    candles = candles[-limit:]
     opens  = [float(c[1]) for c in candles]
-    highs  = [float(c[2]) for c in candles]
-    lows   = [float(c[3]) for c in candles]
-    closes = [float(c[4]) for c in candles]
+    closes = [float(c[2]) for c in candles]
+    highs  = [float(c[3]) for c in candles]
+    lows   = [float(c[4]) for c in candles]
     return opens, highs, lows, closes
 
 
@@ -215,30 +183,35 @@ def get_updates(offset=0):
 
 # ── Mensagem de sinal ─────────────────────────────────────────────
 
-def build_signal_message(direction, label, rsi, macd_trend, stoch_k, pattern, confidence, entry=10):
-    if direction == "CALL":
-        icon   = "CALL"
-        arrow  = "ACIMA"
-        tri    = "^"
+def build_signal_message(sig, entry=10):
+    d      = sig["direction"]
+    label  = sig["label"]
+    rsi    = sig["rsi"]
+    macd_t = sig["macd_trend"]
+    stoch  = sig["stoch_k"]
+    pat    = sig["pattern"]
+    conf   = sig["confidence"]
+    if d == "CALL":
+        icon = "CALL"
+        act  = "ACIMA ^"
     else:
-        icon   = "PUT"
-        arrow  = "ABAIXO"
-        tri    = "v"
-    pattern_line = ""
-    if pattern != "Nenhum":
-        pattern_line = "Padrao: " + pattern + "\n"
+        icon = "PUT"
+        act  = "ABAIXO v"
+    pat_line = ""
+    if pat != "Nenhum":
+        pat_line = "Padrao: " + pat + "\n"
     return (
-        icon + " <b>" + direction + " - " + label + "</b>\n"
+        icon + " <b>" + d + " - " + label + "</b>\n"
         "Expiracao: 1 min\n"
-        "RSI: " + str(rsi) + " | MACD: " + macd_trend + " | Stoch: " + str(stoch_k) + "\n"
-        + pattern_line +
-        "Confianca: " + str(confidence) + "%\n"
+        "RSI: " + str(rsi) + " | MACD: " + macd_t + " | Stoch: " + str(stoch) + "\n"
+        + pat_line +
+        "Confianca: " + str(conf) + "%\n"
         "Entrada sugerida: $" + str(entry) + "\n"
-        "IQ Option -> " + arrow + " " + tri
+        "IQ Option -> " + act
     )
 
 
-# ── Analise completa ──────────────────────────────────────────────
+# ── Analise ───────────────────────────────────────────────────────
 
 def run_analysis(symbol, label, forced=False, target_chat=None):
     ts = datetime.utcnow().strftime("%H:%M:%S")
@@ -252,146 +225,115 @@ def run_analysis(symbol, label, forced=False, target_chat=None):
                 send_telegram(target_chat, msg)
             return None
 
-        # Indicadores
-        rsi                         = calculate_rsi(closes)
-        ema9                        = calculate_ema(closes, EMA_SHORT)
-        ema21                       = calculate_ema(closes, EMA_LONG)
-        bb_upper, bb_mid, bb_lower  = calculate_bollinger(closes)
-        macd_line, macd_sig, macd_t = calculate_macd(closes)
-        stoch_k, stoch_d            = calculate_stochastic(highs, lows, closes)
-        pattern                     = detect_candle_pattern(opens, highs, lows, closes)
-        price                       = closes[-1]
+        rsi                          = calculate_rsi(closes)
+        ema9                         = calculate_ema(closes, EMA_SHORT)
+        ema21                        = calculate_ema(closes, EMA_LONG)
+        bb_upper, bb_mid, bb_lower   = calculate_bollinger(closes)
+        macd_line, macd_sig, macd_t  = calculate_macd(closes)
+        stoch_k, stoch_d             = calculate_stochastic(highs, lows, closes)
+        pattern                      = detect_candle_pattern(opens, highs, lows, closes)
+        price                        = closes[-1]
 
-        # Pontuacao CALL
         call_pts = 0
         put_pts  = 0
 
-        # RSI
-        if rsi < 35:
-            call_pts += 1
-        elif rsi > 65:
-            put_pts  += 1
+        if rsi < 35:   call_pts += 1
+        elif rsi > 65: put_pts  += 1
 
-        # EMA cross
         ema_trend = "Neutro"
-        if ema9 > ema21:
-            call_pts += 1
-            ema_trend = "Alta"
-        elif ema9 < ema21:
-            put_pts  += 1
-            ema_trend = "Baixa"
+        if ema9 > ema21:   call_pts += 1; ema_trend = "Alta"
+        elif ema9 < ema21: put_pts  += 1; ema_trend = "Baixa"
 
-        # Bollinger
         bb_status = "Neutro"
-        if price < bb_lower:
-            call_pts += 1
-            bb_status = "Sobrevendido"
-        elif price > bb_upper:
-            put_pts  += 1
-            bb_status = "Sobrecomprado"
+        if price < bb_lower:   call_pts += 1; bb_status = "Sobrevendido"
+        elif price > bb_upper: put_pts  += 1; bb_status = "Sobrecomprado"
 
-        # MACD
-        if macd_t == "Alta":
-            call_pts += 1
-        elif macd_t == "Baixa":
-            put_pts  += 1
+        if macd_t == "Alta":   call_pts += 1
+        elif macd_t == "Baixa": put_pts += 1
 
-        # Stochastic
-        if stoch_k < 20:
-            call_pts += 1
-        elif stoch_k > 80:
-            put_pts  += 1
+        if stoch_k < 20:   call_pts += 1
+        elif stoch_k > 80: put_pts  += 1
 
-        # Padrao de vela
-        pattern_bonus = 0
+        pat_bonus = 0
         if pattern in ("Martelo", "Engolfo de Alta"):
-            call_pts     += 1
-            pattern_bonus = 1
+            call_pts += 1; pat_bonus = 1
         elif pattern in ("Estrela Cadente", "Engolfo de Baixa"):
-            put_pts      += 1
-            pattern_bonus = 1
+            put_pts += 1; pat_bonus = 1
 
-        # Log detalhado
+        rsi_lbl = "sobrevendido" if rsi < 35 else ("sobrecomprado" if rsi > 65 else "neutro")
+
         print(
             "[" + ts + "] " + symbol +
-            " | P:" + str(round(price, 4)) +
-            " | RSI:" + str(rsi) +
-            " | EMA:" + ema_trend +
-            " | BB:" + bb_status +
-            " | MACD:" + macd_t +
-            " | Stoch:" + str(stoch_k) +
-            " | Padrao:" + pattern +
-            " | CALL=" + str(call_pts) + " PUT=" + str(put_pts)
+            " P:" + str(round(price, 4)) +
+            " RSI:" + str(rsi) + "(" + rsi_lbl + ")" +
+            " EMA:" + ema_trend +
+            " BB:" + bb_status +
+            " MACD:" + macd_t +
+            " Stoch:" + str(stoch_k) +
+            " Pat:" + pattern +
+            " C=" + str(call_pts) + " P=" + str(put_pts)
         )
 
-        # Resposta ao /sinal forcado (sempre responde)
         if forced and target_chat:
-            direction_str = "Sem direcao clara"
-            if call_pts >= 4:
-                direction_str = "CALL forte (" + str(call_pts) + "/6)"
-            elif put_pts >= 4:
-                direction_str = "PUT forte (" + str(put_pts) + "/6)"
-            elif call_pts > put_pts:
-                direction_str = "Leve CALL (" + str(call_pts) + "/6)"
-            elif put_pts > call_pts:
-                direction_str = "Leve PUT (" + str(put_pts) + "/6)"
-
+            dir_str = "Sem direcao"
+            if call_pts >= 4:   dir_str = "CALL forte (" + str(call_pts) + "/6)"
+            elif put_pts >= 4:  dir_str = "PUT forte (" + str(put_pts) + "/6)"
+            elif call_pts > put_pts: dir_str = "Leve CALL (" + str(call_pts) + "/6)"
+            elif put_pts > call_pts: dir_str = "Leve PUT (" + str(put_pts) + "/6)"
             msg = (
                 "<b>Analise: " + label + "</b>\n"
                 "Preco: " + str(round(price, 5)) + "\n"
-                "RSI(14): " + str(rsi) + " | EMA: " + ema_trend + "\n"
+                "RSI(14): " + str(rsi) + " — " + rsi_lbl + "\n"
+                "EMA9/21: " + ema_trend + "\n"
                 "MACD: " + macd_t + " | Stoch: " + str(stoch_k) + "\n"
                 "BB: " + bb_status + "\n"
                 "Padrao: " + pattern + "\n"
-                "Direcao: " + direction_str + "\n"
+                "Direcao: " + dir_str + "\n"
                 "Pontos: CALL=" + str(call_pts) + "/6  PUT=" + str(put_pts) + "/6"
             )
             send_telegram(target_chat, msg)
 
-        # Sinal automatico: 4+ pontos de 6 possiveis
         if call_pts >= 4:
-            base       = 65 + call_pts * 3 + pattern_bonus * 5
-            confidence = min(base + (5 if rsi < 30 else 0), 95)
+            conf = min(65 + call_pts * 3 + pat_bonus * 5 + (5 if rsi < 30 else 0), 95)
             return dict(direction="CALL", label=label, symbol=symbol,
                         rsi=rsi, macd_trend=macd_t, stoch_k=stoch_k,
-                        pattern=pattern, confidence=confidence)
+                        pattern=pattern, confidence=conf)
 
         if put_pts >= 4:
-            base       = 65 + put_pts * 3 + pattern_bonus * 5
-            confidence = min(base + (5 if rsi > 70 else 0), 95)
+            conf = min(65 + put_pts * 3 + pat_bonus * 5 + (5 if rsi > 70 else 0), 95)
             return dict(direction="PUT", label=label, symbol=symbol,
                         rsi=rsi, macd_trend=macd_t, stoch_k=stoch_k,
-                        pattern=pattern, confidence=confidence)
+                        pattern=pattern, confidence=conf)
 
-        print("[" + ts + "] " + symbol + " — sem confluencia suficiente")
+        print("[" + ts + "] " + symbol + " — sem confluencia")
         return None
 
     except Exception as e:
-        err = "[" + ts + "] Erro ao analisar " + symbol + ": " + str(e)
+        err = "[" + ts + "] Erro " + symbol + ": " + str(e)
         print(err)
         if forced and target_chat:
-            send_telegram(target_chat, "Erro ao buscar dados de " + label + ": " + str(e))
+            send_telegram(target_chat, "Erro ao buscar " + label + ": " + str(e))
         return None
 
 
-# ── Comandos do Telegram ──────────────────────────────────────────
+# ── Comandos ──────────────────────────────────────────────────────
 
 def handle_command(text, chat_id):
     ts   = datetime.utcnow().strftime("%H:%M:%S")
     text = text.strip().lower().split("@")[0]
-    print("[" + ts + "] Comando: " + text + " | chat=" + str(chat_id))
+    print("[" + ts + "] CMD: " + text + " chat=" + str(chat_id))
 
     if text == "/start":
         msg = (
             "Ola! Sou o bot de sinais IQ Option.\n\n"
             "Comandos:\n"
             "/start  — Boas-vindas\n"
-            "/status — Status e uptime\n"
-            "/sinal  — Analise imediata de todos os ativos\n\n"
-            "Ativos: BTC, ETH, GBP, SOL\n"
-            "Indicadores: RSI, EMA, BB, MACD, Stochastic\n"
+            "/status — Uptime e cooldowns\n"
+            "/sinal  — Analise imediata de todos ativos\n\n"
+            "Ativos: BTC, ETH, SOL, XRP\n"
+            "Indicadores: RSI + EMA + BB + MACD + Stochastic\n"
             "Padroes: Martelo, Engolfo, Estrela Cadente\n"
-            "Sinal automatico quando 4+ de 6 indicadores confluem."
+            "Sinal automatico com 4+ de 6 indicadores confluindo."
         )
         send_telegram(chat_id, msg)
 
@@ -403,32 +345,30 @@ def handle_command(text, chat_id):
         lines = []
         for sym, lbl in SYMBOLS.items():
             diff = now - last_signal_time.get(sym, 0)
-            if diff < COOLDOWN:
-                lines.append(lbl + ": cooldown " + str(int(COOLDOWN - diff)) + "s")
-            else:
-                lines.append(lbl + ": pronto")
+            status = "cooldown " + str(int(COOLDOWN - diff)) + "s" if diff < COOLDOWN else "pronto"
+            lines.append(lbl + ": " + status)
         msg = (
             "Bot ATIVO\n"
             "Uptime: " + str(h) + "h " + str(m) + "m\n"
-            "API: Bybit | Ciclo: " + str(CHECK_INTERVAL) + "s\n\n"
-            "\n".join(lines)
+            "API: KuCoin | Ciclo: " + str(CHECK_INTERVAL) + "s\n\n"
+            + "\n".join(lines)
         )
         send_telegram(chat_id, msg)
 
     elif text == "/sinal":
-        send_telegram(chat_id, "Analisando " + str(len(SYMBOLS)) + " ativos agora... aguarde.")
+        send_telegram(chat_id, "Analisando " + str(len(SYMBOLS)) + " ativos... aguarde.")
         for symbol, label in SYMBOLS.items():
             run_analysis(symbol, label, forced=True, target_chat=chat_id)
 
     else:
-        send_telegram(chat_id, "Comando nao reconhecido. Use /start, /status ou /sinal")
+        send_telegram(chat_id, "Use /start, /status ou /sinal")
 
 
-# ── Thread polling de comandos ────────────────────────────────────
+# ── Polling thread ────────────────────────────────────────────────
 
 def polling_loop():
     global last_update_id
-    print("Polling iniciado (intervalo: 2s).")
+    print("Polling de comandos iniciado (2s).")
     while True:
         try:
             updates = get_updates(offset=last_update_id + 1)
@@ -444,45 +384,32 @@ def polling_loop():
         time.sleep(2)
 
 
-# ── Thread loop de sinais automaticos ────────────────────────────
+# ── Signal loop ───────────────────────────────────────────────────
 
 def signal_loop():
-    print("Loop de sinais automaticos iniciado.")
+    print("Loop de sinais iniciado.")
     while True:
         ts  = datetime.utcnow().strftime("%H:%M:%S")
         now = time.time()
         print("[" + ts + "] === Ciclo de analise ===")
         found = False
-
         for symbol, label in SYMBOLS.items():
             last = last_signal_time.get(symbol, 0)
             if now - last < COOLDOWN:
-                rem = int(COOLDOWN - (now - last))
-                print("[" + ts + "] " + symbol + " em cooldown (" + str(rem) + "s)")
+                print("[" + ts + "] " + symbol + " cooldown " + str(int(COOLDOWN-(now-last))) + "s")
                 continue
-
             sig = run_analysis(symbol, label)
             if sig:
                 found = True
-                msg = build_signal_message(
-                    direction  = sig["direction"],
-                    label      = sig["label"],
-                    rsi        = sig["rsi"],
-                    macd_trend = sig["macd_trend"],
-                    stoch_k    = sig["stoch_k"],
-                    pattern    = sig["pattern"],
-                    confidence = sig["confidence"],
-                )
-                ok = send_telegram(TELEGRAM_CHAT_ID, msg)
+                msg = build_signal_message(sig)
+                ok  = send_telegram(TELEGRAM_CHAT_ID, msg)
                 if ok:
                     last_signal_time[symbol] = now
-                    print("[" + ts + "] Sinal " + sig["direction"] + " enviado para " + label)
+                    print("[" + ts + "] Sinal " + sig["direction"] + " -> " + label)
                 else:
-                    print("[" + ts + "] Falha ao enviar Telegram")
-
+                    print("[" + ts + "] Falha Telegram")
         if not found:
-            print("[" + ts + "] Sem confluencia — proximo ciclo em " + str(CHECK_INTERVAL) + "s")
-
+            print("[" + ts + "] Sem confluencia — proximo em " + str(CHECK_INTERVAL) + "s")
         try:
             time.sleep(CHECK_INTERVAL)
         except Exception:
@@ -492,14 +419,13 @@ def signal_loop():
 # ── Main ──────────────────────────────────────────────────────────
 
 def main():
-    print("Bot IQ Option iniciado!")
-    print("Ativos: " + str(list(SYMBOLS.keys())))
-    print("API: Bybit | RSI + EMA + BB + MACD + Stoch + Padroes de vela")
-    print("Intervalo: " + str(CHECK_INTERVAL) + "s | Cooldown: " + str(COOLDOWN) + "s")
+    print("Bot IQ Option v3 iniciado!")
+    print("API: KuCoin | Ativos: " + str(list(SYMBOLS.keys())))
+    print("Indicadores: RSI + EMA + BB + MACD + Stoch + Padroes")
+    print("Ciclo: " + str(CHECK_INTERVAL) + "s | Cooldown: " + str(COOLDOWN) + "s")
 
-    t_poll = threading.Thread(target=polling_loop, daemon=True)
-    t_poll.start()
-
+    t = threading.Thread(target=polling_loop, daemon=True)
+    t.start()
     signal_loop()
 
 
