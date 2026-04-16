@@ -3,207 +3,56 @@ import time
 import math
 import requests
 import threading
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 
-# -- Config ----------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-KUCOIN_BASE  = "https://api.kucoin.com/api/v1/market/candles"
-YAHOO_BASE   = "https://query1.finance.yahoo.com/v8/finance/chart/"
+KUCOIN_BASE = "https://api.kucoin.com/api/v1/market/candles"
+SYMBOL      = "GBP-USDT"
+LABEL       = "GBP/USD OTC"
 
-# KuCoin crypto pairs
-CRYPTO_SYMBOLS = {
-    "BTC-USDT": "BTC/USD OTC",
-    "ETH-USDT": "ETH/USD OTC",
-    "SOL-USDT": "SOL/USD OTC",
-    "XRP-USDT": "XRP/USD OTC",
-}
+# Horário de operação: 21:00 — 23:59 BRT (UTC-3)
+BRT_OFFSET      = timedelta(hours=-3)
+SESSION_START_H = 21
+SESSION_START_M = 0
+SESSION_END_H   = 23
+SESSION_END_M   = 59
 
-# Yahoo Finance forex pairs (IQ Option OTC)
-FOREX_SYMBOLS = {
-    "EURUSD=X": "EURUSD OTC",
-    "GBPUSD=X": "GBPUSD OTC",
-    "EURGBP=X": "EURGBP OTC",
-}
+COOLDOWN_SECS   = 300    # 5 minutos entre sinais
+MAX_SIGNALS     = 6      # máximo por noite
+CHECK_INTERVAL  = 30     # segundos entre ciclos de análise
 
-SYMBOLS = {**CRYPTO_SYMBOLS, **FOREX_SYMBOLS}
+# ---------------------------------------------------------------------------
+# Estado global
+# ---------------------------------------------------------------------------
 
-CHECK_INTERVAL = 60
-COOLDOWN       = 300
-RSI_PERIOD     = 14
-EMA_SHORT      = 9
-EMA_LONG       = 21
-BB_PERIOD      = 20
-BB_STD         = 2.0
-MACD_FAST      = 12
-MACD_SLOW      = 26
-MACD_SIGNAL    = 9
-STOCH_K        = 5
-STOCH_D        = 3
-STOCH_SMOOTH   = 3
-
-last_signal_time = {}
-last_update_id   = 0
-start_time       = datetime.utcnow()
+last_signal_time  = 0
+signals_tonight   = 0
+session_notified  = False   # aviso de início enviado hoje?
+session_ended     = False   # aviso de fim enviado hoje?
+last_update_id    = 0
+start_time        = datetime.utcnow()
 
 
-# -- Indicadores -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Horário
+# ---------------------------------------------------------------------------
 
-def calculate_rsi(closes, period=RSI_PERIOD):
-    if len(closes) < period + 1:
-        return 50.0
-    gains, losses = [], []
-    for i in range(1, period + 1):
-        diff = closes[-period - 1 + i] - closes[-period - 1 + i - 1]
-        if diff >= 0:
-            gains.append(diff)
-            losses.append(0)
-        else:
-            gains.append(0)
-            losses.append(-diff)
-    avg_gain = sum(gains) / period
-    avg_loss = sum(losses) / period
-    for i in range(len(closes) - period, len(closes)):
-        diff = closes[i] - closes[i - 1]
-        g = diff if diff > 0 else 0
-        l = -diff if diff < 0 else 0
-        avg_gain = (avg_gain * (period - 1) + g) / period
-        avg_loss = (avg_loss * (period - 1) + l) / period
-    if avg_loss == 0:
-        return 100.0
-    rs = avg_gain / avg_loss
-    return round(100 - 100 / (1 + rs), 2)
+def now_brt():
+    return datetime.now(timezone.utc).astimezone(timezone(BRT_OFFSET))
 
 
-def calculate_ema(closes, period):
-    if len(closes) < period:
-        return closes[-1]
-    k = 2 / (period + 1)
-    ema = sum(closes[:period]) / period
-    for price in closes[period:]:
-        ema = price * k + ema * (1 - k)
-    return round(ema, 6)
-
-
-def calculate_bollinger(closes, period=BB_PERIOD, std_mult=BB_STD):
-    if len(closes) < period:
-        return closes[-1], closes[-1], closes[-1]
-    window = closes[-period:]
-    mean   = sum(window) / period
-    std    = math.sqrt(sum((x - mean) ** 2 for x in window) / period)
-    return round(mean + std_mult * std, 6), round(mean, 6), round(mean - std_mult * std, 6)
-
-
-def calculate_macd(closes, fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL):
-    if len(closes) < slow + signal:
-        return 0, 0, "Neutro"
-    ema_fast   = calculate_ema(closes, fast)
-    ema_slow   = calculate_ema(closes, slow)
-    macd_line  = ema_fast - ema_slow
-    macd_vals  = [calculate_ema(closes[:i], fast) - calculate_ema(closes[:i], slow)
-                  for i in range(slow, len(closes) + 1)]
-    signal_val = calculate_ema(macd_vals, signal) if len(macd_vals) >= signal else macd_line
-    trend      = "Alta" if macd_line > signal_val else "Baixa"
-    return round(macd_line, 6), round(signal_val, 6), trend
-
-
-def calculate_stochastic(highs, lows, closes, k=STOCH_K, smooth=STOCH_SMOOTH):
-    if len(closes) < k:
-        return 50.0, 50.0
-    window_h = highs[-k:]
-    window_l = lows[-k:]
-    highest  = max(window_h)
-    lowest   = min(window_l)
-    if highest == lowest:
-        raw_k = 50.0
-    else:
-        raw_k = 100 * (closes[-1] - lowest) / (highest - lowest)
-    stoch_k_vals = []
-    for i in range(k, len(closes) + 1):
-        h = max(highs[i - k:i])
-        l = min(lows[i - k:i])
-        if h == l:
-            stoch_k_vals.append(50.0)
-        else:
-            stoch_k_vals.append(100 * (closes[i - 1] - l) / (h - l))
-    stoch_d = sum(stoch_k_vals[-smooth:]) / smooth if len(stoch_k_vals) >= smooth else raw_k
-    return round(raw_k, 2), round(stoch_d, 2)
-
-
-def detect_candle_pattern(opens, highs, lows, closes):
-    if len(closes) < 3:
-        return "Nenhum"
-    o1, h1, l1, c1 = opens[-2], highs[-2], lows[-2], closes[-2]
-    o2, h2, l2, c2 = opens[-1], highs[-1], lows[-1], closes[-1]
-    body1  = abs(c1 - o1)
-    body2  = abs(c2 - o2)
-    range1 = h1 - l1 if h1 != l1 else 0.0001
-    range2 = h2 - l2 if h2 != l2 else 0.0001
-    # Engolfo de Alta
-    if c2 > o2 and c1 < o1 and c2 > o1 and o2 < c1:
-        return "Engolfo de Alta"
-    # Engolfo de Baixa
-    if c2 < o2 and c1 > o1 and c2 < o1 and o2 > c1:
-        return "Engolfo de Baixa"
-    # Martelo
-    lower_shadow2 = (min(o2, c2) - l2)
-    upper_shadow2 = (h2 - max(o2, c2))
-    if (lower_shadow2 > 2 * body2 and upper_shadow2 < body2 * 0.5 and body2 / range2 < 0.4):
-        return "Martelo"
-    # Estrela Cadente
-    if (upper_shadow2 > 2 * body2 and lower_shadow2 < body2 * 0.5 and body2 / range2 < 0.4):
-        return "Estrela Cadente"
-    return "Nenhum"
-
-
-# -- Dados de mercado -------------------------------------------------------
-
-def get_candles_kucoin(symbol, interval="1min", limit=120):
-    params = {"symbol": symbol, "type": interval}
-    resp   = requests.get(KUCOIN_BASE, params=params, timeout=10)
-    resp.raise_for_status()
-    data = resp.json()
-    if data.get("code") != "200000":
-        raise Exception("KuCoin: " + str(data.get("msg", "erro desconhecido")))
-    candles = data["data"]
-    candles.reverse()
-    candles = candles[-limit:]
-    opens  = [float(c[1]) for c in candles]
-    closes = [float(c[2]) for c in candles]
-    highs  = [float(c[3]) for c in candles]
-    lows   = [float(c[4]) for c in candles]
-    return opens, highs, lows, closes
-
-
-def get_candles_yahoo(symbol, limit=120):
-    url     = YAHOO_BASE + symbol
-    params  = {"interval": "1m", "range": "1d"}
-    headers = {"User-Agent": "Mozilla/5.0"}
-    resp    = requests.get(url, params=params, headers=headers, timeout=10)
-    resp.raise_for_status()
-    data    = resp.json()
-    result  = data["chart"]["result"][0]
-    ohlcv   = result["indicators"]["quote"][0]
-    opens_raw  = ohlcv["open"]
-    highs_raw  = ohlcv["high"]
-    lows_raw   = ohlcv["low"]
-    closes_raw = ohlcv["close"]
-    opens, highs, lows, closes = [], [], [], []
-    for i in range(len(closes_raw)):
-        if (opens_raw[i] is not None and highs_raw[i] is not None
-                and lows_raw[i] is not None and closes_raw[i] is not None):
-            opens.append(float(opens_raw[i]))
-            highs.append(float(highs_raw[i]))
-            lows.append(float(lows_raw[i]))
-            closes.append(float(closes_raw[i]))
-    return opens[-limit:], highs[-limit:], lows[-limit:], closes[-limit:]
-
-
-def get_candles_full(symbol, limit=120):
-    if symbol in FOREX_SYMBOLS:
-        return get_candles_yahoo(symbol, limit)
-    return get_candles_kucoin(symbol, limit=limit)
+def in_session():
+    """Retorna True se estiver dentro da janela 21:00–23:59 BRT."""
+    t = now_brt()
+    start = t.replace(hour=SESSION_START_H, minute=SESSION_START_M, second=0, microsecond=0)
+    end   = t.replace(hour=SESSION_END_H,   minute=SESSION_END_M,   second=59, microsecond=999999)
+    return start <= t <= end
 
 
 def seconds_to_next_candle():
@@ -212,31 +61,142 @@ def seconds_to_next_candle():
     return 60.0 - elapsed
 
 
-# -- Expiração recomendada --------------------------------------------------
+# ---------------------------------------------------------------------------
+# Dados de mercado
+# ---------------------------------------------------------------------------
 
-def get_expiration(rsi, stoch_k, pattern):
-    strong_patterns = ["Engolfo de Alta", "Engolfo de Baixa", "Estrela Cadente"]
-    if stoch_k < 20 or stoch_k > 80:
-        return "1 minuto"
-    if pattern in strong_patterns:
-        return "1 minuto"
-    if rsi < 30 or rsi > 70:
-        return "2 minutos"
-    return "5 minutos"
+def get_candles(limit=10):
+    """Busca as últimas `limit` velas de 1 min no KuCoin para GBP-USDT."""
+    params = {"symbol": SYMBOL, "type": "1min"}
+    resp   = requests.get(KUCOIN_BASE, params=params, timeout=10)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("code") != "200000":
+        raise Exception("KuCoin: " + str(data.get("msg", "erro")))
+    candles = data["data"]
+    candles.reverse()   # ordem cronológica (mais antiga primeiro)
+    candles = candles[-limit:]
+    opens  = [float(c[1]) for c in candles]
+    closes = [float(c[2]) for c in candles]
+    highs  = [float(c[3]) for c in candles]
+    lows   = [float(c[4]) for c in candles]
+    return opens, highs, lows, closes
 
 
-# -- Telegram --------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Detecção de padrões Price Action
+# ---------------------------------------------------------------------------
 
-def send_telegram(chat_id, message):
-    if not TELEGRAM_BOT_TOKEN:
+def is_bullish(o, c):
+    return c > o
+
+def is_bearish(o, c):
+    return c < o
+
+def body_size(o, c):
+    return abs(c - o)
+
+def candle_range(h, l):
+    return h - l if h != l else 0.00001
+
+def upper_shadow(o, c, h):
+    return h - max(o, c)
+
+def lower_shadow(o, c, l):
+    return min(o, c) - l
+
+def is_doji(o, c, h, l):
+    """Doji: corpo muito pequeno (< 25% do range total)."""
+    return body_size(o, c) <= 0.25 * candle_range(h, l)
+
+
+def detect_pattern(opens, highs, lows, closes):
+    """
+    Analisa as últimas velas e retorna (direction, pattern_name) ou (None, None).
+    direction: 'CALL' (compra) ou 'PUT' (venda).
+    Requer pelo menos 5 velas.
+    """
+    if len(closes) < 5:
+        return None, None
+
+    # Índices das últimas 5 velas (0 = mais antiga, 4 = mais recente)
+    o = opens[-5:]
+    h = highs[-5:]
+    l = lows[-5:]
+    c = closes[-5:]
+
+    # ---- PADRÕES DE COMPRA ------------------------------------------------
+
+    # Martelo: vela atual (índice 4) com sombra inferior >= 2x corpo,
+    #          precedida por pelo menos 2 velas de baixa (índices 2 e 3)
+    o4, h4, l4, c4 = o[4], h[4], l[4], c[4]
+    body4   = body_size(o4, c4)
+    lshadow4 = lower_shadow(o4, c4, l4)
+    ushadow4 = upper_shadow(o4, c4, h4)
+    rng4     = candle_range(h4, l4)
+    two_bearish_before = is_bearish(o[2], c[2]) and is_bearish(o[3], c[3])
+
+    if (body4 > 0
+            and lshadow4 >= 2 * body4
+            and ushadow4 <= 0.3 * rng4
+            and two_bearish_before):
+        return "CALL", "Martelo"
+
+    # Engolfo de Alta: vela atual (4) bullish que engole vela anterior (3) bearish
+    if (is_bullish(o[4], c[4])
+            and is_bearish(o[3], c[3])
+            and c[4] > o[3]
+            and o[4] < c[3]):
+        return "CALL", "Engolfo de Alta"
+
+    # Estrela da Manhã: vela 2 bearish forte + vela 3 doji + vela 4 bullish forte
+    big_bear = is_bearish(o[2], c[2]) and body_size(o[2], c[2]) >= 0.5 * candle_range(h[2], l[2])
+    doji_mid = is_doji(o[3], c[3], h[3], l[3])
+    big_bull = is_bullish(o[4], c[4]) and body_size(o[4], c[4]) >= 0.5 * candle_range(h[4], l[4])
+    if big_bear and doji_mid and big_bull:
+        return "CALL", "Estrela da Manhã"
+
+    # ---- PADRÕES DE VENDA ------------------------------------------------
+
+    # Estrela Cadente: sombra superior >= 2x corpo, precedida por 2+ velas de alta
+    two_bullish_before = is_bullish(o[2], c[2]) and is_bullish(o[3], c[3])
+
+    if (body4 > 0
+            and ushadow4 >= 2 * body4
+            and lshadow4 <= 0.3 * rng4
+            and two_bullish_before):
+        return "PUT", "Estrela Cadente"
+
+    # Engolfo de Baixa: vela atual (4) bearish que engole vela anterior (3) bullish
+    if (is_bearish(o[4], c[4])
+            and is_bullish(o[3], c[3])
+            and o[4] > c[3]
+            and c[4] < o[3]):
+        return "PUT", "Engolfo de Baixa"
+
+    # Estrela da Tarde: vela 2 bullish forte + vela 3 doji + vela 4 bearish forte
+    big_bull2 = is_bullish(o[2], c[2]) and body_size(o[2], c[2]) >= 0.5 * candle_range(h[2], l[2])
+    big_bear2 = is_bearish(o[4], c[4]) and body_size(o[4], c[4]) >= 0.5 * candle_range(h[4], l[4])
+    if big_bull2 and doji_mid and big_bear2:
+        return "PUT", "Estrela da Tarde"
+
+    return None, None
+
+
+# ---------------------------------------------------------------------------
+# Telegram
+# ---------------------------------------------------------------------------
+
+def send_telegram(message):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return False
     url  = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
-    data = {"chat_id": chat_id, "text": message, "parse_mode": "HTML"}
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "HTML"}
     try:
         resp = requests.post(url, json=data, timeout=10)
         return resp.status_code == 200
     except Exception as e:
-        print("Erro send_telegram: " + str(e))
+        print("Erro Telegram: " + str(e))
         return False
 
 
@@ -250,214 +210,93 @@ def get_updates(offset=0):
         return []
 
 
-# -- Mensagens -------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Mensagens
+# ---------------------------------------------------------------------------
 
-SEP = "━━━━━━━━━━━━━━━"
-
-def build_signal_message(sig, entry=10):
-    d     = sig["direction"]
-    label = sig["label"]
-    rsi   = sig["rsi"]
-    stoch = sig["stoch_k"]
-    pat   = sig["pattern"]
-    expir = get_expiration(rsi, stoch, pat)
-    if d == "CALL":
-        header = "U0001f7e2 COMPRE — " + label
-        action = "➡️ IQ Option → clique no botão VERDE"
-    else:
-        header = "U0001f534 VENDA — " + label
-        action = "➡️ IQ Option → clique no botão VERMELHO"
-    return (
-        header + "\n"
-        + "⏱ Tempo: " + expir + "\n"
-        + "U0001f4b0 Entrada: $" + str(entry) + "\n"
-        + "⏰ Você tem 50 segundos para entrar!\n"
-        + action
-    )
-
-
-def build_warning_message(sig):
-    d     = sig["direction"]
-    label = sig["label"]
-    if d == "CALL":
-        cor = "U0001f7e2 VERDE = COMPRE"
-    else:
-        cor = "U0001f534 VERMELHO = VENDA"
-    return (
-        "⚡ ÚLTIMO AVISO — " + label + "\n"
-        + "⏰ 20 segundos! Clique logo!\n"
-        + cor
-    )
-
-
-# -- Analise ---------------------------------------------------------------
-
-def run_analysis(symbol, label, forced=False, target_chat=None):
-    ts = datetime.utcnow().strftime("%H:%M:%S")
-    try:
-        opens, highs, lows, closes = get_candles_full(symbol)
-        if len(closes) < 50:
-            msg = "Dados insuficientes para " + label
-            print("[" + ts + "] " + msg)
-            if forced and target_chat:
-                send_telegram(target_chat, msg)
-            return None
-        rsi                         = calculate_rsi(closes)
-        ema9                        = calculate_ema(closes, EMA_SHORT)
-        ema21                       = calculate_ema(closes, EMA_LONG)
-        bb_upper, bb_mid, bb_lower  = calculate_bollinger(closes)
-        macd_line, macd_sig, macd_t = calculate_macd(closes)
-        stoch_k, stoch_d            = calculate_stochastic(highs, lows, closes)
-        pattern                     = detect_candle_pattern(opens, highs, lows, closes)
-        price                       = closes[-1]
-        call_pts = 0
-        put_pts  = 0
-        pat_bonus = 0
-        # RSI
-        rsi_lbl = "Neutro"
-        if rsi < 30:
-            call_pts += 1
-            rsi_lbl = "Sobrevendido"
-        elif rsi > 70:
-            put_pts += 1
-            rsi_lbl = "Sobrecomprado"
-        # EMA
-        ema_trend = "Neutro"
-        if ema9 > ema21:
-            call_pts += 1
-            ema_trend = "Alta"
-        elif ema9 < ema21:
-            put_pts += 1
-            ema_trend = "Baixa"
-        # Bollinger Bands
-        bb_status = "Neutro"
-        if closes[-1] <= bb_lower:
-            call_pts += 1
-            bb_status = "Abaixo da banda"
-        elif closes[-1] >= bb_upper:
-            put_pts += 1
-            bb_status = "Acima da banda"
-        # MACD
-        if macd_t == "Alta":
-            call_pts += 1
-        elif macd_t == "Baixa":
-            put_pts += 1
-        # Stochastic
-        if stoch_k < 20:
-            call_pts += 1
-        elif stoch_k > 80:
-            put_pts += 1
-        # Candle pattern
-        if pattern in ("Engolfo de Alta", "Martelo"):
-            call_pts += 1
-            pat_bonus = 1
-        elif pattern in ("Engolfo de Baixa", "Estrela Cadente"):
-            put_pts += 1
-            pat_bonus = 1
-        print(
-            "[" + ts + "] " + symbol +
-            " P:" + str(round(price, 4)) +
-            " RSI:" + str(rsi) + "(" + rsi_lbl + ")" +
-            " EMA:" + ema_trend +
-            " BB:" + bb_status +
-            " MACD:" + macd_t +
-            " Stoch:" + str(stoch_k) +
-            " Pat:" + pattern +
-            " C=" + str(call_pts) + " P=" + str(put_pts)
+def msg_signal(direction):
+    if direction == "CALL":
+        return (
+            "U0001f7e2 <b>COMPRE — GBP/USD OTC</b>\n"
+            + "⏱ Tempo: 1 minuto\n"
+            + "➡️ Clique no botão VERDE"
         )
-        if forced and target_chat:
-            dir_str = "Sem direcao"
-            if call_pts >= 3:
-                dir_str = "CALL forte (" + str(call_pts) + "/6)"
-            elif put_pts >= 3:
-                dir_str = "PUT forte (" + str(put_pts) + "/6)"
-            elif call_pts > put_pts:
-                dir_str = "Leve CALL (" + str(call_pts) + "/6)"
-            elif put_pts > call_pts:
-                dir_str = "Leve PUT (" + str(put_pts) + "/6)"
-            msg = (
-                "<b>Analise: " + label + "</b>\n"
-                "Preco: " + str(round(price, 5)) + "\n"
-                "RSI(14): " + str(rsi) + " - " + rsi_lbl + "\n"
-                "EMA9/21: " + ema_trend + "\n"
-                "MACD: " + macd_t + " | Stoch: " + str(stoch_k) + "\n"
-                "BB: " + bb_status + "\n"
-                "Padrao: " + pattern + "\n"
-                "Direcao: " + dir_str + "\n"
-                "Pontos: CALL=" + str(call_pts) + "/6 PUT=" + str(put_pts) + "/6"
-            )
-            send_telegram(target_chat, msg)
-        if call_pts >= 3:
-            conf = min(65 + call_pts * 3 + pat_bonus * 5 + (5 if rsi < 30 else 0), 95)
-            return dict(direction="CALL", label=label, symbol=symbol,
-                        rsi=rsi, macd_trend=macd_t, stoch_k=stoch_k,
-                        pattern=pattern, confidence=conf)
-        if put_pts >= 3:
-            conf = min(65 + put_pts * 3 + pat_bonus * 5 + (5 if rsi > 70 else 0), 95)
-            return dict(direction="PUT", label=label, symbol=symbol,
-                        rsi=rsi, macd_trend=macd_t, stoch_k=stoch_k,
-                        pattern=pattern, confidence=conf)
-        print("[" + ts + "] " + symbol + " - sem confluencia")
-        return None
-    except Exception as e:
-        err = "[" + ts + "] Erro " + symbol + ": " + str(e)
-        print(err)
-        if forced and target_chat:
-            send_telegram(target_chat, "Erro ao buscar " + label + ": " + str(e))
-        return None
+    else:
+        return (
+            "U0001f534 <b>VENDA — GBP/USD OTC</b>\n"
+            + "⏱ Tempo: 1 minuto\n"
+            + "➡️ Clique no botão VERMELHO"
+        )
 
 
-# -- Comandos --------------------------------------------------------------
+def msg_warning():
+    return (
+        "⚡ 20 segundos! Clique logo!\n"
+        + "U0001f7e2 VERDE = COMPRE\n"
+        + "U0001f534 VERMELHO = VENDA"
+    )
+
+
+def msg_session_start():
+    return (
+        "U0001f7e2 <b>Horário de operação iniciado!</b>\n"
+        + "Monitorando GBP/USD OTC..."
+    )
+
+
+def msg_session_end():
+    return (
+        "U0001f534 <b>Encerrando operações por hoje.</b>\n"
+        + "Até amanhã às 21h!"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Comandos Telegram
+# ---------------------------------------------------------------------------
 
 def handle_command(text, chat_id):
-    ts   = datetime.utcnow().strftime("%H:%M:%S")
+    ts   = now_brt().strftime("%H:%M:%S BRT")
     text = text.strip().lower().split("@")[0]
-    print("[" + ts + "] CMD: " + text + " chat=" + str(chat_id))
+    print("[" + ts + "] CMD: " + text)
     if text == "/start":
         msg = (
-            "U0001f44b Ola! Sou o <b>Bot de Sinais IQ Option</b>.\n\n"
-            "<b>Comandos:</b>\n"
-            "/start - Boas-vindas\n"
-            "/status - Uptime e cooldowns\n"
-            "/sinal - Analise imediata de todos os ativos\n\n"
-            "U0001f4cc <b>Ativos (7):</b> BTC, ETH, SOL, XRP, EURUSD, GBPUSD, EURGBP\n"
-            "U0001f4ca <b>Indicadores:</b> RSI - EMA - BB - MACD - Stochastic\n"
-            "U0001f56f <b>Padroes:</b> Martelo, Engolfo, Estrela Cadente\n"
-            "⏰ Sinal enviado 50s antes do fechamento da vela!\n"
-            "✅ Confluencia minima: 3 de 6 indicadores.\n"
-            "⏱ Expiracao dinamica: 1, 2 ou 5 minutos conforme forca do sinal."
+            "U0001f44b Olá! Sou o <b>Bot GBP/USD OTC</b>.\n\n"
+            "<b>Estratégia:</b> Price Action (velas)\n"
+            "<b>Ativo:</b> GBP/USD OTC\n"
+            "<b>Horário:</b> 21h – 23h59 (Brasília)\n"
+            "<b>Padrões:</b> Martelo, Engolfo, Estrela da Manhã/Tarde\n"
+            "<b>Máx. sinais:</b> 6 por noite\n\n"
+            "/status — ver estado atual"
         )
-        send_telegram(chat_id, msg)
+        url  = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
+        requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
     elif text == "/status":
-        uptime = datetime.utcnow() - start_time
+        brt_now = now_brt()
+        sessao  = "Ativa ✅" if in_session() else "Inativa (fora do horário)"
+        uptime  = datetime.utcnow() - start_time
         h = int(uptime.total_seconds() // 3600)
         m = int((uptime.total_seconds() % 3600) // 60)
-        now = time.time()
-        lines = ["<b>Status do Bot</b>", "Uptime: " + str(h) + "h " + str(m) + "m", ""]
-        for symbol, label in SYMBOLS.items():
-            last = last_signal_time.get(symbol, 0)
-            if last == 0:
-                lines.append(label + ": aguardando sinal")
-            else:
-                remaining = int(COOLDOWN - (now - last))
-                if remaining > 0:
-                    lines.append(label + ": cooldown " + str(remaining) + "s")
-                else:
-                    lines.append(label + ": pronto")
-        send_telegram(chat_id, "\n".join(lines))
-    elif text == "/sinal":
-        send_telegram(chat_id, "U0001f50d Analisando 7 ativos...")
-        for symbol, label in SYMBOLS.items():
-            run_analysis(symbol, label, forced=True, target_chat=chat_id)
-    else:
-        send_telegram(chat_id, "Comando desconhecido. Use /start, /status ou /sinal.")
+        remaining_cd = max(0, int(COOLDOWN_SECS - (time.time() - last_signal_time)))
+        msg = (
+            "<b>Status</b>\n"
+            "Hora BRT: " + brt_now.strftime("%H:%M:%S") + "\n"
+            "Sessão: " + sessao + "\n"
+            "Sinais hoje: " + str(signals_tonight) + "/" + str(MAX_SIGNALS) + "\n"
+            "Cooldown: " + (str(remaining_cd) + "s" if remaining_cd > 0 else "pronto") + "\n"
+            "Uptime: " + str(h) + "h " + str(m) + "m"
+        )
+        url  = "https://api.telegram.org/bot" + TELEGRAM_BOT_TOKEN + "/sendMessage"
+        requests.post(url, json={"chat_id": chat_id, "text": msg, "parse_mode": "HTML"}, timeout=10)
 
 
-# -- Polling ---------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Polling Telegram
+# ---------------------------------------------------------------------------
 
 def polling_loop():
     global last_update_id
-    print("Polling Telegram iniciado.")
+    print("Polling iniciado.")
     while True:
         try:
             updates = get_updates(offset=last_update_id + 1)
@@ -473,66 +312,132 @@ def polling_loop():
         time.sleep(2)
 
 
-# -- Signal loop -----------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Loop principal de sinais
+# ---------------------------------------------------------------------------
 
 def signal_loop():
+    global last_signal_time, signals_tonight, session_notified, session_ended
+
     print("Loop de sinais iniciado.")
+
+    # Rastreia o dia atual para resetar contagem de sinais à meia-noite BRT
+    last_day = now_brt().date()
+
     while True:
-        ts  = datetime.utcnow().strftime("%H:%M:%S")
-        now = time.time()
-        print("[" + ts + "] === Ciclo de analise ===")
-        for symbol, label in SYMBOLS.items():
-            last = last_signal_time.get(symbol, 0)
-            if now - last < COOLDOWN:
-                secs_cd = int(COOLDOWN - (now - last))
-                print("[" + ts + "] " + symbol + " cooldown " + str(secs_cd) + "s")
+        try:
+            brt_now  = now_brt()
+            ts       = brt_now.strftime("%H:%M:%S BRT")
+            today    = brt_now.date()
+
+            # Reset diário à meia-noite
+            if today != last_day:
+                signals_tonight  = 0
+                session_notified = False
+                session_ended    = False
+                last_day         = today
+                print("[" + ts + "] Reset diario: sinais e flags zerados.")
+
+            active = in_session()
+
+            # --- Aviso de INÍCIO de sessão ---
+            if active and not session_notified:
+                session_notified = True
+                session_ended    = False
+                ok = send_telegram(msg_session_start())
+                print("[" + ts + "] Sessao iniciada. Telegram: " + str(ok))
+
+            # --- Aviso de FIM de sessão ---
+            if not active and session_notified and not session_ended:
+                session_ended = True
+                ok = send_telegram(msg_session_end())
+                print("[" + ts + "] Sessao encerrada. Telegram: " + str(ok))
+
+            # --- Fora do horário: dorme e continua ---
+            if not active:
+                print("[" + ts + "] Fora do horario de operacao.")
+                time.sleep(CHECK_INTERVAL)
                 continue
-            sig = run_analysis(symbol, label)
-            if not sig:
+
+            # --- Limite de sinais atingido ---
+            if signals_tonight >= MAX_SIGNALS:
+                print("[" + ts + "] Limite de " + str(MAX_SIGNALS) + " sinais atingido.")
+                time.sleep(CHECK_INTERVAL)
                 continue
+
+            # --- Cooldown ---
+            now = time.time()
+            if now - last_signal_time < COOLDOWN_SECS:
+                remaining = int(COOLDOWN_SECS - (now - last_signal_time))
+                print("[" + ts + "] Cooldown: " + str(remaining) + "s restantes.")
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            # --- Busca candles e detecta padrão ---
+            try:
+                opens, highs, lows, closes = get_candles(limit=10)
+            except Exception as e:
+                print("[" + ts + "] Erro ao buscar candles: " + str(e))
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            direction, pattern = detect_pattern(opens, highs, lows, closes)
+
+            if not direction:
+                print("[" + ts + "] Nenhum padrao detectado.")
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            # --- Aguarda janela ideal (50s antes do fechamento da vela) ---
             secs_left = seconds_to_next_candle()
             if secs_left > 58:
-                wait_time = secs_left - 58
-                ts2 = datetime.utcnow().strftime("%H:%M:%S")
-                print("[" + ts2 + "] " + symbol + " aguardando " + str(round(wait_time, 1)) + "s para janela 50s")
-                time.sleep(wait_time)
+                wait = secs_left - 58
+                print("[" + ts + "] Aguardando " + str(round(wait, 1)) + "s para janela de 50s.")
+                time.sleep(wait)
                 secs_left = seconds_to_next_candle()
             if secs_left < 5:
-                ts2 = datetime.utcnow().strftime("%H:%M:%S")
-                print("[" + ts2 + "] " + symbol + " janela perdida, pulando")
+                print("[" + ts + "] Janela perdida, pulando.")
+                time.sleep(CHECK_INTERVAL)
                 continue
-            ts2   = datetime.utcnow().strftime("%H:%M:%S")
-            msg_s = build_signal_message(sig)
-            ok    = send_telegram(TELEGRAM_CHAT_ID, msg_s)
+
+            # --- Envia sinal ---
+            ts2 = now_brt().strftime("%H:%M:%S BRT")
+            ok  = send_telegram(msg_signal(direction))
             if ok:
-                last_signal_time[symbol] = time.time()
-                print("[" + ts2 + "] Sinal " + sig["direction"] + " -> " + label + " (50s para fechar)")
+                last_signal_time  = time.time()
+                signals_tonight  += 1
+                print("[" + ts2 + "] Sinal " + direction + " (" + pattern + ") enviado. Total: " + str(signals_tonight) + "/" + str(MAX_SIGNALS))
             else:
-                print("[" + ts2 + "] Falha Telegram no sinal principal")
+                print("[" + ts2 + "] Falha ao enviar sinal.")
+                time.sleep(CHECK_INTERVAL)
                 continue
+
+            # --- Segundo aviso após 30s ---
             time.sleep(30)
-            ts3 = datetime.utcnow().strftime("%H:%M:%S")
-            msg_aviso = build_warning_message(sig)
-            ok2 = send_telegram(TELEGRAM_CHAT_ID, msg_aviso)
+            ts3 = now_brt().strftime("%H:%M:%S BRT")
+            ok2 = send_telegram(msg_warning())
             if ok2:
-                print("[" + ts3 + "] Segundo aviso enviado -> " + label)
+                print("[" + ts3 + "] Segundo aviso enviado.")
             else:
-                print("[" + ts3 + "] Falha Telegram no segundo aviso")
-        try:
+                print("[" + ts3 + "] Falha no segundo aviso.")
+
             time.sleep(CHECK_INTERVAL)
-        except Exception:
-            pass
+
+        except Exception as e:
+            ts = now_brt().strftime("%H:%M:%S BRT")
+            print("[" + ts + "] Erro no loop: " + str(e))
+            time.sleep(CHECK_INTERVAL)
 
 
-# -- Main ------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    print("Bot IQ Option v5 iniciado!")
-    print("API: KuCoin (crypto) + Yahoo Finance (forex) | Ativos: " + str(list(SYMBOLS.keys())))
-    print("Indicadores: RSI + EMA + BB + MACD + Stoch + Padroes")
-    print("Ciclo: " + str(CHECK_INTERVAL) + "s | Cooldown: " + str(COOLDOWN) + "s")
-    print("Timing: sinal 50s antes do fechamento da vela")
-    print("Expiracao: dinamica (1, 2 ou 5 minutos)")
+    print("Bot GBP/USD OTC Price Action v1 iniciado!")
+    print("Ativo: " + SYMBOL + " | Horario: 21:00-23:59 BRT")
+    print("Padroes: Martelo, Engolfo de Alta/Baixa, Estrela da Manha/Tarde, Estrela Cadente")
+    print("Max sinais: " + str(MAX_SIGNALS) + " | Cooldown: " + str(COOLDOWN_SECS) + "s")
     t = threading.Thread(target=polling_loop, daemon=True)
     t.start()
     signal_loop()
