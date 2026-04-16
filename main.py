@@ -255,35 +255,23 @@ def get_updates(offset=0):
 SEP = "━━━━━━━━━━━━━━━"
 
 def build_signal_message(sig, entry=10):
-    d      = sig["direction"]
-    label  = sig["label"]
-    rsi    = sig["rsi"]
-    macd_t = sig["macd_trend"]
-    stoch  = sig["stoch_k"]
-    pat    = sig["pattern"]
-    conf   = sig["confidence"]
-    expir  = get_expiration(rsi, stoch, pat)
+    d     = sig["direction"]
+    label = sig["label"]
+    rsi   = sig["rsi"]
+    stoch = sig["stoch_k"]
+    pat   = sig["pattern"]
+    expir = get_expiration(rsi, stoch, pat)
     if d == "CALL":
-        header = "U0001f7e2 <b>CALL — " + label + "</b>"
-        action = "➡️ IQ Option → <b>ACIMA ▲</b>"
+        header = "U0001f7e2 COMPRE — " + label
+        action = "➡️ IQ Option → clique no botão VERDE"
     else:
-        header = "U0001f534 <b>PUT — " + label + "</b>"
-        action = "➡️ IQ Option → <b>ABAIXO ▼</b>"
-    pat_line = ""
-    if pat != "Nenhum":
-        pat_line = "U0001f56f <b>Padrão:</b> <i>" + pat + "</i>\n"
+        header = "U0001f534 VENDA — " + label
+        action = "➡️ IQ Option → clique no botão VERMELHO"
     return (
         header + "\n"
-        + SEP + "\n"
-        + "⏱ <b>Expiração recomendada:</b> " + expir + "\n"
-        + "U0001f4ca <b>RSI:</b> " + str(rsi)
-        + " | <b>MACD:</b> " + macd_t
-        + " | <b>Stoch:</b> " + str(stoch) + "\n"
-        + pat_line
-        + "U0001f4aa <b>Confiança:</b> " + str(conf) + "%\n"
-        + "U0001f4b0 <b>Entrada:</b> $" + str(entry) + "\n"
-        + SEP + "\n"
-        + "⏰ <b>Você tem 50 segundos para entrar!</b>\n"
+        + "⏱ Tempo: " + expir + "\n"
+        + "U0001f4b0 Entrada: $" + str(entry) + "\n"
+        + "⏰ Você tem 50 segundos para entrar!\n"
         + action
     )
 
@@ -292,13 +280,13 @@ def build_warning_message(sig):
     d     = sig["direction"]
     label = sig["label"]
     if d == "CALL":
-        action = "➡️ IQ Option → <b>ACIMA ▲</b>"
+        cor = "U0001f7e2 VERDE = COMPRE"
     else:
-        action = "➡️ IQ Option → <b>ABAIXO ▼</b>"
+        cor = "U0001f534 VERMELHO = VENDA"
     return (
-        "⚡ <b>ÚLTIMO AVISO — " + label + " " + d + "</b>\n"
-        + "⏰ <b>20 segundos! Entra agora ou perde!</b>\n"
-        + action
+        "⚡ ÚLTIMO AVISO — " + label + "\n"
+        + "⏰ 20 segundos! Clique logo!\n"
+        + cor
     )
 
 
