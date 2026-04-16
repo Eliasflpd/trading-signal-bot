@@ -10,10 +10,10 @@ TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
 SYMBOLS = {
-    "GBPUSDT":  "GBP/USD",
-    "BTCUSDT":  "BTC/USD",
-    "SPYUSDT":  "US 500 (SPY)",
-    "AMZNUSDT": "Amazon OTC",
+    "BTCUSDT": "BTC/USD",
+    "ETHUSDT": "ETH/USD",
+    "GBPUSDT": "GBP/USD",
+    "SOLUSDT": "SOL/USD",
 }
 
 BINANCE_BASE   = "https://api.binance.com/api/v3"
