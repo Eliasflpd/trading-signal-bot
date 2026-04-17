@@ -48,7 +48,7 @@ session_wins  = 0
 session_losses = 0
 stop_until = 0.0
 
-last_signal_id = None   # UUID do Ãºltimo sinal inserido no Supabase
+last_signal_id = None   # UUID do ÃÂºltimo sinal inserido no Supabase
 
 m1_candles = []
 m5_candles = []
@@ -58,7 +58,7 @@ data_lock = threading.Lock()
 supa: Client = None
 
 # ---------------------------------------------------------------------------
-# Supabase â Journaling
+# Supabase Ã¢ÂÂ Journaling
 # ---------------------------------------------------------------------------
 
 def init_supabase():
@@ -70,7 +70,7 @@ def init_supabase():
         except Exception as e:
             print("[Supabase] Erro ao inicializar: " + str(e))
     else:
-        print("[Supabase] URL/KEY nÃ£o configurados. Journaling desativado.")
+        print("[Supabase] URL/KEY nÃÂ£o configurados. Journaling desativado.")
 
 
 def log_signal(ativo, direcao, padrao, confianca, volume_confirmado, m5_confirmado, sessao, validado_ia=True):
@@ -122,7 +122,7 @@ def get_weekly_stats():
         losses = sum(1 for r in rows if r["resultado"] == "LOSS")
         win_rate = int(wins / total * 100) if total > 0 else 0
 
-        # Melhor padrÃ£o
+        # Melhor padrÃÂ£o
         pattern_stats = {}
         for r in rows:
             p = r.get("padrao") or "N/A"
@@ -134,7 +134,7 @@ def get_weekly_stats():
         best_pattern = max(pattern_stats, key=lambda k: pattern_stats[k]["wins"] / pattern_stats[k]["total"] if pattern_stats[k]["total"] > 0 else 0)
         best_pattern_rate = int(pattern_stats[best_pattern]["wins"] / pattern_stats[best_pattern]["total"] * 100) if pattern_stats[best_pattern]["total"] > 0 else 0
 
-        # Melhor sessÃ£o
+        # Melhor sessÃÂ£o
         session_stats = {}
         for r in rows:
             s = r.get("sessao") or "N/A"
@@ -184,11 +184,11 @@ def get_daily_stats():
 
         return {"total": total, "wins": wins, "losses": losses, "win_rate": win_rate, "best_pattern": best_pattern}
     except Exception as e:
-        print("[Supabase] Erro stats diÃ¡rias: " + str(e))
+        print("[Supabase] Erro stats diÃÂ¡rias: " + str(e))
         return None
 
 # ---------------------------------------------------------------------------
-# UtilitÃ¡rios de tempo
+# UtilitÃÂ¡rios de tempo
 # ---------------------------------------------------------------------------
 
 def now_brt():
@@ -206,7 +206,7 @@ def active_session():
 
 
 # ---------------------------------------------------------------------------
-# WebSocket Binance â M1
+# WebSocket Binance Ã¢ÂÂ M1
 # ---------------------------------------------------------------------------
 
 def on_m1_message(ws, message):
@@ -252,7 +252,7 @@ def start_m1_ws():
 
 
 # ---------------------------------------------------------------------------
-# WebSocket Binance â M5
+# WebSocket Binance Ã¢ÂÂ M5
 # ---------------------------------------------------------------------------
 
 def on_m5_message(ws, message):
@@ -382,7 +382,7 @@ def m5_trend():
 
 
 # ---------------------------------------------------------------------------
-# NotÃ­cias econÃ´micas
+# NotÃÂ­cias econÃÂ´micas
 # ---------------------------------------------------------------------------
 
 NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -463,7 +463,7 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None):
     vol_icon = "Alto \u2705" if vol_strong else "Baixo \u26a0\ufe0f"
     ia_linha = ""
     if ia_confianca is not None:
-        ia_linha = " | \U0001f916 IA: Validado \u2705 | Confiança: " + str(ia_confianca) + "%"
+        ia_linha = " | \U0001f916 IA: Validado \u2705 | ConfianÃ§a: " + str(ia_confianca) + "%"
         if ia_risco:
             ia_linha += " | Risco: " + ia_risco
     if direction == "CALL":
@@ -473,7 +473,7 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None):
             "\u23f1 Tempo: 1 minuto" + ia_linha + "\n"
             "\U0001f4ca Volume: " + vol_icon + " | M5: " + trend_icon + "\n"
             "\u27a1\ufe0f Clique no bot\u00e3o VERDE\n"
-            "\u26a1 ÚLTIMO AVISO \u2014 20 segundos!"
+            "\u26a1 ÃLTIMO AVISO \u2014 20 segundos!"
         )
     else:
         trend_icon = "Baixa \u2705" if trend == "DOWN" else ("Alta \u26a0\ufe0f" if trend == "UP" else "\u2014")
@@ -482,7 +482,7 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None):
             "\u23f1 Tempo: 1 minuto" + ia_linha + "\n"
             "\U0001f4ca Volume: " + vol_icon + " | M5: " + trend_icon + "\n"
             "\u27a1\ufe0f Clique no bot\u00e3o VERMELHO\n"
-            "\u26a1 ÚLTIMO AVISO \u2014 20 segundos!"
+            "\u26a1 ÃLTIMO AVISO \u2014 20 segundos!"
         )
 
 def msg_warning():
@@ -520,7 +520,7 @@ def record_win():
 
 
 # ---------------------------------------------------------------------------
-# RelatÃ³rio diÃ¡rio automÃ¡tico (23:59 BRT)
+# RelatÃÂ³rio diÃÂ¡rio automÃÂ¡tico (23:59 BRT)
 # ---------------------------------------------------------------------------
 
 _daily_report_sent_date = None
@@ -541,7 +541,7 @@ def check_daily_report():
                 "Padr\u00e3o mais certeiro: " + stats["best_pattern"]
             )
             send_telegram(msg)
-            print("[RelatÃ³rio] Resumo diÃ¡rio enviado.")
+            print("[RelatÃÂ³rio] Resumo diÃÂ¡rio enviado.")
 
 
 # ---------------------------------------------------------------------------
@@ -556,7 +556,7 @@ def handle_command(text, chat_id):
 
     if text == "/start":
         msg = (
-            "\U0001f44b Ol\u00e1! Sou o <b>Bot GBP/USD OTC BOT-N3</b>.\n\n"
+            "\U0001f44b Ol\u00e1! Sou o <b>Bot GBP/USD OTC BOT-N5</b>.\n\n"
             "<b>Estrat\u00e9gia:</b> Price Action + Volume + MTF + Journaling\n"
             "<b>Ativo:</b> GBP/USD OTC\n\n"
             "<b>Janelas di\u00e1rias (BRT):</b>\n"
@@ -564,7 +564,7 @@ def handle_command(text, chat_id):
             "\U0001f55d 14:00 \u2013 16:00 \u2014 Londres + NY\n"
             "\U0001f315 21:00 \u2013 23:59 \u2014 Noturna\n\n"
             "<b>M\u00e1x.:</b> 6 sinais por sess\u00e3o\n"
-            "/status | /perdi | /ganhei | /placar | /relatorio"
+            "/status | /perdi | /ganhei | /placar | /relatorio\n<b>Admin:</b> /addvip | /removevip | /listvip"
         )
         send_to(chat_id, msg)
 
@@ -585,7 +585,7 @@ def handle_command(text, chat_id):
             resume = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
             paused = "\n\U0001f6d1 Pausado at\u00e9 " + resume.strftime("%H:%M") + " (3 perdas)"
         msg = (
-            "<b>Status BOT-N3</b>\n"
+            "<b>Status BOT-N5</b>\n"
             "Hora BRT: " + brt_now.strftime("%H:%M:%S") + "\n"
             "Sess\u00e3o: " + sessao + "\n"
             "Cooldown: " + (str(remaining_cd) + "s" if remaining_cd > 0 else "pronto") + "\n"
@@ -593,7 +593,19 @@ def handle_command(text, chat_id):
             "Uptime: " + str(h) + "h " + str(m) + "m"
             + paused
         )
-        send_to(chat_id, msg)
+        # BOT-N5: VIP info
+        vip_members_list = list_vip_active()
+        vip_count = len(vip_members_list)
+        vip_lines = "\n\U0001f451 <b>Membros VIP ativos:</b> " + str(vip_count)
+        if vip_members_list:
+            # Próximas expirações (top 3)
+            sorted_vips = sorted(vip_members_list, key=lambda x: x.get("expira_em",""))
+            vip_lines += "\n<b>Próximas expirações:</b>"
+            for v in sorted_vips[:3]:
+                nome_v = v.get("nome") or v["telegram_id"]
+                exp_v  = v.get("expira_em","?")[:10] if v.get("expira_em") else "?"
+                vip_lines += "\n\u2022 " + nome_v + " — " + exp_v
+        send_to(chat_id, msg + vip_lines)
 
     elif text == "/perdi":
         triggered, resume_time = record_loss()
@@ -637,6 +649,65 @@ def handle_command(text, chat_id):
         )
         send_to(chat_id, msg)
 
+    # ----- BOT-N5: Comandos Admin VIP -----
+    elif text.startswith("/addvip"):
+        if chat_id != TELEGRAM_CHAT_ID:
+            send_to(chat_id, "\u26d4 Acesso negado.")
+            return
+        parts = text.split()
+        if len(parts) < 3:
+            send_to(chat_id, "Uso: /addvip [telegram_id] [dias]")
+            return
+        tid  = parts[1]
+        try:
+            dias = int(parts[2])
+        except ValueError:
+            send_to(chat_id, "Dias deve ser um numero.")
+            return
+        ok_vip = add_vip(tid, dias)
+        if ok_vip:
+            # Mensagem de boas-vindas para o VIP
+            send_to(tid,
+                "\U0001f389 Bem-vindo ao Sinais IQ Option VIP!\n\n"
+                "Você receberá sinais automáticos de\n"
+                "GBP/USD OTC diretamente aqui.\n\n"
+                "\u2705 Acesso ativo por " + str(dias) + " dias\n"
+                "\U0001f4f1 Qualquer dúvida fale com o admin."
+            )
+            send_to(chat_id, "\u2705 VIP ativado para " + tid + " por " + str(dias) + " dias")
+        else:
+            send_to(chat_id, "\u274c Erro ao ativar VIP. Verifique o Supabase.")
+
+    elif text.startswith("/removevip"):
+        if chat_id != TELEGRAM_CHAT_ID:
+            send_to(chat_id, "\u26d4 Acesso negado.")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            send_to(chat_id, "Uso: /removevip [telegram_id]")
+            return
+        tid = parts[1]
+        ok_vip = remove_vip(tid)
+        if ok_vip:
+            send_to(chat_id, "\u274c VIP removido para " + tid)
+        else:
+            send_to(chat_id, "Erro ao remover VIP.")
+
+    elif text == "/listvip":
+        if chat_id != TELEGRAM_CHAT_ID:
+            send_to(chat_id, "\u26d4 Acesso negado.")
+            return
+        members = list_vip_active()
+        if not members:
+            send_to(chat_id, "\U0001f4cb Nenhum membro VIP ativo.")
+            return
+        lines = ["\U0001f4cb <b>VIPs Ativos (" + str(len(members)) + ")</b>"]
+        for m in members:
+            expira_str = m.get("expira_em", "?")[:10] if m.get("expira_em") else "?"
+            nome_str   = m.get("nome") or m["telegram_id"]
+            lines.append("\u2022 " + nome_str + " | ID: " + m["telegram_id"] + " | Expira: " + expira_str)
+        send_to(chat_id, "\n".join(lines))
+
 
 # ---------------------------------------------------------------------------
 # Polling
@@ -666,17 +737,17 @@ def polling_loop():
 
 
 # ---------------------------------------------------------------------------
-# BOT-N4: Validação via Claude API
+# BOT-N4: ValidaÃ§Ã£o via Claude API
 # ---------------------------------------------------------------------------
 
 def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
     if not ANTHROPIC_API_KEY:
-        print("[Claude] ANTHROPIC_API_KEY não configurada. Pulando validação IA.")
-        return True, 70, "API key não configurada", "MÉDIO"
+        print("[Claude] ANTHROPIC_API_KEY nÃ£o configurada. Pulando validaÃ§Ã£o IA.")
+        return True, 70, "API key nÃ£o configurada", "MÃDIO"
     try:
         brt_now = now_brt().strftime("%H:%M BRT")
         sess_idx, sess_info = active_session()
-        sessao_nome = sess_info[4] if sess_info else "Fora de sessão"
+        sessao_nome = sess_info[4] if sess_info else "Fora de sessÃ£o"
         vol_vs_media = "Alto" if vol_strong else "Baixo"
         trend_label = "Alta" if trend == "UP" else ("Baixa" if trend == "DOWN" else "Lateral")
         closed = [c for c in candles_m1 if c["is_closed"]]
@@ -688,19 +759,19 @@ def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
                          + " L=" + str(round(c["low"],5))
                          + " C=" + str(round(c["close"],5)) + "\n")
         prompt = (
-            "Você é um trader profissional especializado em opções binárias OTC. "
-            "Analise estes dados e decida se o sinal é VÁLIDO ou INVÁLIDO.\n\n"
+            "VocÃª Ã© um trader profissional especializado em opÃ§Ãµes binÃ¡rias OTC. "
+            "Analise estes dados e decida se o sinal Ã© VÃLIDO ou INVÃLIDO.\n\n"
             "Dados:\n"
             "- Ativo: GBP/USD OTC\n"
-            "- Direção detectada: " + direction + "\n"
-            "- Padrão de vela: " + str(pattern) + "\n"
-            "- Volume vs média: " + vol_vs_media + "\n"
-            "- Tendência M5: " + trend_label + "\n"
-            "- Horário BRT: " + brt_now + "\n"
-            "- Sessão ativa: " + sessao_nome + "\n"
-            "- Últimas 5 velas (open, high, low, close):\n" + velas_str + "\n"
-            "Responda APENAS em JSON válido (sem markdown):\n"
-            '{"validar": true, "confianca": 80, "motivo": "explicação", "risco": "BAIXO"}'
+            "- DireÃ§Ã£o detectada: " + direction + "\n"
+            "- PadrÃ£o de vela: " + str(pattern) + "\n"
+            "- Volume vs mÃ©dia: " + vol_vs_media + "\n"
+            "- TendÃªncia M5: " + trend_label + "\n"
+            "- HorÃ¡rio BRT: " + brt_now + "\n"
+            "- SessÃ£o ativa: " + sessao_nome + "\n"
+            "- Ãltimas 5 velas (open, high, low, close):\n" + velas_str + "\n"
+            "Responda APENAS em JSON vÃ¡lido (sem markdown):\n"
+            '{"validar": true, "confianca": 80, "motivo": "explicaÃ§Ã£o", "risco": "BAIXO"}'
         )
         client_ia = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client_ia.messages.create(
@@ -717,17 +788,121 @@ def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
         valido    = bool(res.get("validar", False))
         confianca = int(res.get("confianca", 0))
         motivo    = str(res.get("motivo", ""))
-        risco     = str(res.get("risco", "MÉDIO"))
-        print("[Claude] validar=" + str(valido) + " confiança=" + str(confianca) + "% risco=" + risco)
+        risco     = str(res.get("risco", "MÃDIO"))
+        print("[Claude] validar=" + str(valido) + " confianÃ§a=" + str(confianca) + "% risco=" + risco)
         return valido, confianca, motivo, risco
     except Exception as e:
         print("[Claude] Erro: " + str(e))
-        return True, 65, "Erro na API, sinal liberado", "MÉDIO"
+        return True, 65, "Erro na API, sinal liberado", "MÃDIO"
+
+
+
+# ---------------------------------------------------------------------------
+# BOT-N5: Membros VIP
+# ---------------------------------------------------------------------------
+
+def get_vip_members():
+    if supa is None:
+        return []
+    try:
+        now_iso = datetime.utcnow().isoformat()
+        resp = supa.table("vip_members").select("telegram_id,nome").eq("ativo", True).gt("expira_em", now_iso).execute()
+        return resp.data or []
+    except Exception as e:
+        print("[VIP] Erro ao buscar membros: " + str(e))
+        return []
+
+
+def add_vip(telegram_id, dias, nome=None):
+    if supa is None:
+        return False
+    try:
+        expira = (datetime.utcnow() + timedelta(days=dias)).isoformat()
+        supa.table("vip_members").upsert({
+            "telegram_id": telegram_id,
+            "nome": nome or telegram_id,
+            "plano": "mensal" if dias <= 31 else ("trimestral" if dias <= 92 else "semestral"),
+            "ativo": True,
+            "expira_em": expira,
+        }).execute()
+        return True
+    except Exception as e:
+        print("[VIP] Erro ao adicionar: " + str(e))
+        return False
+
+
+def remove_vip(telegram_id):
+    if supa is None:
+        return False
+    try:
+        supa.table("vip_members").update({"ativo": False}).eq("telegram_id", telegram_id).execute()
+        return True
+    except Exception as e:
+        print("[VIP] Erro ao remover: " + str(e))
+        return False
+
+
+def list_vip_active():
+    if supa is None:
+        return []
+    try:
+        now_iso = datetime.utcnow().isoformat()
+        resp = supa.table("vip_members").select("*").eq("ativo", True).gt("expira_em", now_iso).execute()
+        return resp.data or []
+    except Exception as e:
+        print("[VIP] Erro ao listar: " + str(e))
+        return []
+
+
+def count_vip_active():
+    return len(get_vip_members())
+
+
+def check_vip_expirations():
+    if supa is None:
+        return
+    try:
+        now = datetime.utcnow()
+        in3days = (now + timedelta(days=3)).isoformat()
+        resp3 = supa.table("vip_members").select("*").eq("ativo", True).lt("expira_em", in3days).gt("expira_em", now.isoformat()).execute()
+        for m in (resp3.data or []):
+            tid = m["telegram_id"]
+            send_to(tid,
+                "\u26a0\ufe0f Seu acesso VIP expira em 3 dias!\n"
+                "Para renovar fale com o admin."
+            )
+        resp_exp = supa.table("vip_members").select("*").eq("ativo", True).lte("expira_em", now.isoformat()).execute()
+        for m in (resp_exp.data or []):
+            tid = m["telegram_id"]
+            supa.table("vip_members").update({"ativo": False}).eq("telegram_id", tid).execute()
+            send_to(tid,
+                "\U0001f534 Seu acesso VIP foi encerrado.\n"
+                "Obrigado por usar nossos sinais!\n"
+                "Para reativar fale com o admin."
+            )
+            print("[VIP] Acesso encerrado para " + tid)
+    except Exception as e:
+        print("[VIP] Erro ao checar expiracoes: " + str(e))
+
+
+def send_signal_to_vips(signal_text):
+    members = get_vip_members()
+    sent = 0
+    for m in members:
+        tid = m["telegram_id"]
+        if tid != TELEGRAM_CHAT_ID:
+            try:
+                send_to(tid, signal_text)
+                sent += 1
+            except Exception as e:
+                print("[VIP] Erro ao enviar para " + tid + ": " + str(e))
+    return sent
 
 
 def signal_loop():
     global last_signal_time
     global session_signals, session_notified, session_ended
+    last_vip_check = 0.0  # BOT-N5: controle de verificação VIP
 
     print("Aguardando dados do WebSocket...")
     for _ in range(60):
@@ -748,12 +923,12 @@ def signal_loop():
             ts  = now_brt().strftime("%H:%M:%S BRT")
             now = time.time()
 
-            # RelatÃ³rio diÃ¡rio
+            # RelatÃÂ³rio diÃÂ¡rio
             check_daily_report()
 
             if now < stop_until:
                 resume = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
-                print("[" + ts + "] Pausado atÃ© " + resume.strftime("%H:%M"))
+                print("[" + ts + "] Pausado atÃÂ© " + resume.strftime("%H:%M"))
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -769,11 +944,11 @@ def signal_loop():
                     session_ended[i]    = False
                     session_signals[i]  = 0
                     send_telegram(msg_session_start(name, sh, sm, eh, em))
-                    print("[" + ts + "] SessÃ£o " + name + " aberta.")
+                    print("[" + ts + "] SessÃÂ£o " + name + " aberta.")
                 if not is_on and session_notified[i] and not session_ended[i]:
                     session_ended[i] = True
                     send_telegram(msg_session_end(name))
-                    print("[" + ts + "] SessÃ£o " + name + " encerrada.")
+                    print("[" + ts + "] SessÃÂ£o " + name + " encerrada.")
 
             if idx is None:
                 time.sleep(CHECK_INTERVAL)
@@ -794,9 +969,9 @@ def signal_loop():
 
             blocked, mins, return_time = check_news_block()
             if blocked:
-                msg_news = ("\u26a0\ufe0f NotÃ­cia importante em " + str(mins) + " minutos!\nPausando sinais por seguranÃ§a.\nRetorno em: " + return_time)
+                msg_news = ("\u26a0\ufe0f NotÃÂ­cia importante em " + str(mins) + " minutos!\nPausando sinais por seguranÃÂ§a.\nRetorno em: " + return_time)
                 send_telegram(msg_news)
-                print("[" + ts + "] NotÃ­cia em " + str(mins) + "min.")
+                print("[" + ts + "] NotÃÂ­cia em " + str(mins) + "min.")
                 time.sleep(max(60, mins * 60))
                 continue
 
@@ -813,7 +988,7 @@ def signal_loop():
 
             direction, pattern = detect_pattern(all_m1)
             if direction is None:
-                print("[" + ts + "] Nenhum padrÃ£o.")
+                print("[" + ts + "] Nenhum padrÃÂ£o.")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -834,13 +1009,13 @@ def signal_loop():
                     time.sleep(CHECK_INTERVAL)
                     continue
 
-            # Calcula confianÃ§a (0-100)
+            # Calcula confianÃÂ§a (0-100)
             confianca = 50
             if vol_strong: confianca += 25
             if trend is not None: confianca += 25
 
             ts2 = now_brt().strftime("%H:%M:%S BRT")
-            # BOT-N4: Validação via Claude API
+            # BOT-N4: ValidaÃ§Ã£o via Claude API
             ia_valido, ia_confianca, ia_motivo, ia_risco = validate_with_claude(
                 direction, pattern, vol_strong, trend, m1_snap
             )
@@ -849,15 +1024,20 @@ def signal_loop():
                 time.sleep(CHECK_INTERVAL)
                 continue
             if ia_confianca < 65:
-                print("[IA] Confiança insuficiente: " + str(ia_confianca) + "%. Ignorando.")
+                print("[IA] ConfianÃ§a insuficiente: " + str(ia_confianca) + "%. Ignorando.")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            ok  = send_telegram(msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco))
+            signal_text = msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco)
+            ok  = send_telegram(signal_text)
             if ok:
                 last_signal_time     = time.time()
                 session_signals[idx] += 1
                 print("[" + ts2 + "] [" + name + "] " + direction + " (" + str(pattern) + ") #" + str(session_signals[idx]) + " IA=" + str(ia_confianca) + "%")
+                # BOT-N5: Envia para VIPs
+                vip_count = send_signal_to_vips(signal_text)
+                if vip_count > 0:
+                    print("[VIP] Sinal enviado para " + str(vip_count) + " membro(s) VIP.")
                 # Registra no Supabase
                 log_signal(
                     ativo="GBP/USD OTC",
@@ -892,8 +1072,8 @@ def signal_loop():
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Bot GBP/USD OTC BOT-N4 iniciado!")
-    print("Features: WebSocket + Volume + MTF + Noticias + Stop Loss + Supabase Journaling + Claude AI")
+    print("Bot GBP/USD OTC BOT-N5 iniciado!")
+    print("Features: WebSocket + Volume + MTF + Noticias + Stop Loss + Supabase Journaling + Claude AI + VIP")
     init_supabase()
     t_m1 = threading.Thread(target=start_m1_ws, daemon=True)
     t_m1.start()
