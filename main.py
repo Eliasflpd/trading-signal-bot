@@ -32,6 +32,11 @@ COOLDOWN_SECS  = 300
 MAX_SIGNALS    = 6
 CHECK_INTERVAL = 30
 
+# Anti-Martingale
+BASE_BET_DEMO  = 1.0   # $1 demo
+BASE_BET_REAL  = 10.0  # $10 real
+MAX_LOSSES_AM  = 6     # Para apos 6 perdas seguidas
+
 # ---------------------------------------------------------------------------
 # Estado global
 # ---------------------------------------------------------------------------
@@ -47,6 +52,9 @@ consecutive_losses = 0
 session_wins  = 0
 session_losses = 0
 stop_until = 0.0
+
+# Anti-Martingale
+current_bet = BASE_BET_DEMO  # Valor atual da entrada
 
 last_signal_id = None   # UUID do ÃÂºltimo sinal inserido no Supabase
 
@@ -459,13 +467,16 @@ def get_updates(offset=0):
 # Mensagens
 # ---------------------------------------------------------------------------
 
-def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None):
+def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None, bet=None):
     vol_icon = "Alto \u2705" if vol_strong else "Baixo \u26a0\ufe0f"
     ia_linha = ""
     if ia_confianca is not None:
         ia_linha = " | \U0001f916 IA: Validado \u2705 | ConfianÃ§a: " + str(ia_confianca) + "%"
         if ia_risco:
             ia_linha += " | Risco: " + ia_risco
+    bet_linha = ""
+    if bet is not None:
+        bet_linha = "\n\U0001f4b0 Entrada: $" + str(bet)
     if direction == "CALL":
         trend_icon = "Alta \u2705" if trend == "UP" else ("Baixa \u26a0\ufe0f" if trend == "DOWN" else "\u2014")
         return (
@@ -473,7 +484,7 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None):
             "\u23f1 Tempo: 1 minuto" + ia_linha + "\n"
             "\U0001f4ca Volume: " + vol_icon + " | M5: " + trend_icon + "\n"
             "\u27a1\ufe0f Clique no bot\u00e3o VERDE\n"
-            "\u26a1 ÃLTIMO AVISO \u2014 20 segundos!"
+            "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha
         )
     else:
         trend_icon = "Baixa \u2705" if trend == "DOWN" else ("Alta \u26a0\ufe0f" if trend == "UP" else "\u2014")
@@ -482,7 +493,7 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None):
             "\u23f1 Tempo: 1 minuto" + ia_linha + "\n"
             "\U0001f4ca Volume: " + vol_icon + " | M5: " + trend_icon + "\n"
             "\u27a1\ufe0f Clique no bot\u00e3o VERMELHO\n"
-            "\u26a1 ÃLTIMO AVISO \u2014 20 segundos!"
+            "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha
         )
 
 def msg_warning():
@@ -502,20 +513,30 @@ def msg_session_end(name):
 # ---------------------------------------------------------------------------
 
 def record_loss():
-    global consecutive_losses, session_losses, stop_until
+    global consecutive_losses, session_losses, stop_until, current_bet
     session_losses += 1
     consecutive_losses += 1
     update_last_result("LOSS")
+    # Anti-Martingale: dobra o valor apos cada perda
+    current_bet = current_bet * 2
+    # Para apos 6 perdas seguidas (Anti-Martingale limit)
+    if consecutive_losses >= MAX_LOSSES_AM:
+        stop_until = time.time() + 86400  # Pausa ate amanha
+        current_bet = BASE_BET_DEMO       # Reset do valor
+        return "6", ""
+    # Mantém pausa de 1h apos 3 perdas seguidas (BOT-N2 feature)
     if consecutive_losses >= 3:
         stop_until = time.time() + 3600
         resume_dt = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
-        return True, resume_dt.strftime("%H:%M")
+        return "3", resume_dt.strftime("%H:%M")
     return False, ""
 
 def record_win():
-    global consecutive_losses, session_wins
+    global consecutive_losses, session_wins, stop_until, current_bet
     session_wins += 1
     consecutive_losses = 0
+    current_bet = BASE_BET_DEMO  # Reset ao valor base
+    stop_until = time.time() + 86400  # Para sessao apos vitoria (Anti-Martingale)
     update_last_result("WIN")
 
 
@@ -549,7 +570,7 @@ def check_daily_report():
 # ---------------------------------------------------------------------------
 
 def handle_command(text, chat_id):
-    global consecutive_losses, session_wins, session_losses, stop_until
+    global consecutive_losses, session_wins, session_losses, stop_until, current_bet
     ts   = now_brt().strftime("%H:%M:%S BRT")
     text = text.strip().lower().split("@")[0]
     print("[" + ts + "] CMD: " + text)
@@ -585,11 +606,12 @@ def handle_command(text, chat_id):
             resume = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
             paused = "\n\U0001f6d1 Pausado at\u00e9 " + resume.strftime("%H:%M") + " (3 perdas)"
         msg = (
-            "<b>Status BOT-N5</b>\n"
+            "<b>Status BOT-N6</b>\n"
             "Hora BRT: " + brt_now.strftime("%H:%M:%S") + "\n"
             "Sess\u00e3o: " + sessao + "\n"
             "Cooldown: " + (str(remaining_cd) + "s" if remaining_cd > 0 else "pronto") + "\n"
-            "Perdas seguidas: " + str(consecutive_losses) + "\n"
+            "Perdas seguidas: " + str(consecutive_losses) + "/" + str(MAX_LOSSES_AM) + "\n"
+            "\U0001f4b0 Pr\u00f3xima entrada: $" + str(current_bet) + "\n"
             "Uptime: " + str(h) + "h " + str(m) + "m"
             + paused
         )
@@ -609,15 +631,34 @@ def handle_command(text, chat_id):
 
     elif text == "/perdi":
         triggered, resume_time = record_loss()
-        if triggered:
-            msg = ("\U0001f6d1 3 perdas seguidas detectadas.\nPausando por 60 minutos.\nPr\u00f3xima sess\u00e3o: " + resume_time)
+        if triggered == "6":
+            msg = (
+                "\U0001f6d1 <b>6 tentativas sem sucesso.</b>\n"
+                "Encerrando sess\u00e3o. At\u00e9 amanh\u00e3!\n"
+                "\U0001f4b0 Valor resetado para: $" + str(BASE_BET_DEMO)
+            )
+        elif triggered == "3":
+            msg = (
+                "\U0001f6d1 3 perdas seguidas detectadas.\n"
+                "Pausando por 60 minutos.\n"
+                "Pr\u00f3xima sess\u00e3o: " + resume_time + "\n"
+                "\U0001f4b0 Pr\u00f3xima entrada: $" + str(current_bet)
+            )
         else:
-            msg = "\U0001f4c9 Perda registrada. Perdas seguidas: " + str(consecutive_losses) + "/3"
+            msg = (
+                "\U0001f4c9 Perda registrada. Perdas seguidas: " + str(consecutive_losses) + "/" + str(MAX_LOSSES_AM) + "\n"
+                "\U0001f4b0 Pr\u00f3xima entrada: $" + str(current_bet)
+            )
         send_to(chat_id, msg)
 
     elif text == "/ganhei":
         record_win()
-        msg = "\U0001f4c8 Vit\u00f3ria registrada! Perdas seguidas zeradas. \u2705"
+        msg = (
+            "\U0001f4c8 <b>Vit\u00f3ria registrada!</b> Perdas seguidas zeradas. \u2705\n"
+            "\U0001f3c6 Anti-Martingale: sess\u00e3o encerrada com lucro.\n"
+            "\U0001f4b0 Valor resetado para: $" + str(BASE_BET_DEMO) + "\n"
+            "\U0001f305 Retorno amanh\u00e3!"
+        )
         send_to(chat_id, msg)
 
     elif text == "/placar":
@@ -900,7 +941,7 @@ def send_signal_to_vips(signal_text):
 
 
 def signal_loop():
-    global last_signal_time
+    global last_signal_time, current_bet
     global session_signals, session_notified, session_ended
     last_vip_check = 0.0  # BOT-N5: controle de verificação VIP
 
@@ -916,7 +957,7 @@ def signal_loop():
     else:
         print("Timeout WS. Prosseguindo mesmo assim.")
 
-    print("Loop de sinais iniciado (BOT-N3).")
+    print("Loop de sinais iniciado (BOT-N6).")
 
     while True:
         try:
@@ -1028,7 +1069,7 @@ def signal_loop():
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            signal_text = msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco)
+            signal_text = msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco, bet=current_bet)
             ok  = send_telegram(signal_text)
             if ok:
                 last_signal_time     = time.time()
@@ -1072,8 +1113,8 @@ def signal_loop():
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Bot GBP/USD OTC BOT-N5 iniciado!")
-    print("Features: WebSocket + Volume + MTF + Noticias + Stop Loss + Supabase Journaling + Claude AI + VIP")
+    print("Bot GBP/USD OTC BOT-N6 iniciado!")
+    print("Features: WebSocket + Volume + MTF + Noticias + Stop Loss + Supabase Journaling + Claude AI + VIP + Anti-Martingale")
     init_supabase()
     t_m1 = threading.Thread(target=start_m1_ws, daemon=True)
     t_m1.start()
