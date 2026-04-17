@@ -2,10 +2,8 @@ import os
 import time
 import math
 import json
-import uuid
 import requests
 import threading
-import websocket
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import anthropic
@@ -39,13 +37,12 @@ MAX_LOSSES_AM  = 6
 
 # ---------------------------------------------------------------------------
 # Ativos
-# GBP e EUR: KuCoin WebSocket (sem bloqueio geografico na Railway/AWS)
-# AUD: yfinance (KuCoin nao tem AUDUSD)
+# Todos os ativos: Yahoo Finance via requests HTTP (atualiza a cada 60s)
 # ---------------------------------------------------------------------------
 ASSETS = {
-    "GBP": {"label": "GBP/USD OTC", "source": "kucoin", "symbol": "GBPUSDT"},
-    "EUR": {"label": "EUR/USD OTC", "source": "kucoin", "symbol": "EURUSDT"},
-    "AUD": {"label": "AUD/USD OTC", "source": "yahoo",  "symbol": "AUDUSD=X"},
+    "GBP": {"label": "GBP/USD OTC", "source": "yahoo", "symbol": "GBPUSD=X"},
+    "EUR": {"label": "EUR/USD OTC", "source": "yahoo", "symbol": "EURUSD=X"},
+    "AUD": {"label": "AUD/USD OTC", "source": "yahoo", "symbol": "AUDUSD=X"},
 }
 
 # ---------------------------------------------------------------------------
@@ -213,171 +210,6 @@ def active_session():
     return None, None
 
 
-# ---------------------------------------------------------------------------
-# KuCoin WebSocket — GBP e EUR
-# Protocolo: obtem token publico -> conecta -> subscreve candles 1m e 5m
-# ---------------------------------------------------------------------------
-
-KUCOIN_TOKEN_URL = "https://api.kucoin.com/api/v1/bullet-public"
-
-def get_kucoin_token():
-    """Obtem token e endpoint para o WebSocket publico da KuCoin."""
-    try:
-        print("[KuCoin] Solicitando token publico em " + KUCOIN_TOKEN_URL)
-        r = requests.post(KUCOIN_TOKEN_URL, timeout=15)
-        print("[KuCoin] HTTP status: " + str(r.status_code))
-        r.raise_for_status()
-        data = r.json()["data"]
-        token    = data["token"]
-        endpoint = data["instanceServers"][0]["endpoint"]
-        print("[KuCoin] Token obtido! Endpoint: " + endpoint)
-        print("[KuCoin] Token (primeiros 20 chars): " + token[:20] + "...")
-        return token, endpoint
-    except Exception as e:
-        print("[KuCoin] ERRO ao obter token: " + str(type(e).__name__) + ": " + str(e))
-        return None, None
-
-
-def make_kucoin_candle(raw_candle, timeframe):
-    """
-    Converte candle KuCoin para formato padrao.
-    KuCoin candle array: [timestamp, open, close, high, low, volume, amount]
-    Indices:              [0]        [1]    [2]    [3]   [4]  [5]     [6]
-    NOTA: KuCoin nao envia is_closed diretamente.
-    Usamos is_closed=False para o candle atual (live update).
-    Candles historicos via subscribe sao todos fechados.
-    """
-    try:
-        c = raw_candle
-        return {
-            "open":      float(c[1]),
-            "high":      float(c[3]),
-            "low":       float(c[4]),
-            "close":     float(c[2]),
-            "volume":    float(c[5]),
-            "is_closed": False,  # sera atualizado no proximo tick
-        }
-    except Exception:
-        return None
-
-
-def start_kucoin_ws(asset_key, timeframe):
-    """Inicia WebSocket KuCoin para um ativo e timeframe ('m1' ou 'm5')."""
-    interval   = "1min" if timeframe == "m1" else "5min"
-    symbol     = ASSETS[asset_key]["symbol"]
-    topic      = "/market/candles:" + symbol + "_" + interval
-    candle_store = asset_m1 if timeframe == "m1" else asset_m5
-    max_len    = 25 if timeframe == "m1" else 30
-    tag        = "[KuCoin " + timeframe.upper() + " " + asset_key + "]"
-
-    # Rastreia o timestamp do ultimo candle para detectar fechamento
-    last_ts = [None]
-
-    def connect():
-        print(tag + " Iniciando conexao KuCoin...")
-        token, endpoint = get_kucoin_token()
-        if not token:
-            print(tag + " FALHA ao obter token. Retry em 10s.")
-            time.sleep(10)
-            threading.Thread(target=connect, daemon=True).start()
-            return
-        print(tag + " Token OK. Preparando WebSocket...")
-
-        connect_id = uuid.uuid4().hex
-        ws_url = endpoint + "?token=" + token + "&connectId=" + connect_id
-        print(tag + " Conectando: " + endpoint)
-
-        def on_open(ws):
-            print(tag + " Conectado. Subscrevendo " + topic)
-            sub_msg = json.dumps({
-                "id": uuid.uuid4().hex,
-                "type": "subscribe",
-                "topic": topic,
-                "privateChannel": False,
-                "response": True,
-            })
-            ws.send(sub_msg)
-
-        def on_message(ws, message):
-            try:
-                msg = json.loads(message)
-                msg_type = msg.get("type", "")
-
-                # Ping/pong keep-alive
-                if msg_type == "ping":
-                    ws.send(json.dumps({"id": msg.get("id","1"), "type": "pong"}))
-                    return
-
-                if msg_type != "message":
-                    return
-
-                data = msg.get("data", {})
-                candles = data.get("candles")
-                if not candles:
-                    return
-
-                candle = make_kucoin_candle(candles, timeframe)
-                if candle is None:
-                    return
-
-                ts = candles[0]  # timestamp do candle atual
-
-                with data_lock:
-                    lst = candle_store[asset_key]
-
-                    if last_ts[0] is None:
-                        print(tag + " PRIMEIRO CANDLE recebido! ts=" + str(ts) + " close=" + str(candles[2]))
-                        last_ts[0] = ts
-                        candle["is_closed"] = False
-                        if lst and not lst[-1]["is_closed"]:
-                            lst[-1] = candle
-                        else:
-                            lst.append(candle)
-                    elif ts != last_ts[0]:
-                        # Novo timestamp = candle anterior fechou
-                        if lst and not lst[-1]["is_closed"]:
-                            lst[-1]["is_closed"] = True
-                        last_ts[0] = ts
-                        candle["is_closed"] = False
-                        lst.append(candle)
-                        if len(lst) > max_len:
-                            candle_store[asset_key] = lst[-max_len:]
-                    else:
-                        # Mesmo timestamp = update do candle atual
-                        if lst and not lst[-1]["is_closed"]:
-                            lst[-1] = candle
-                        else:
-                            lst.append(candle)
-
-                closed = len([c for c in candle_store[asset_key] if c["is_closed"]])
-                if closed % 5 == 0 and closed > 0:
-                    print(tag + " " + str(closed) + " candles fechados")
-
-            except Exception as e:
-                print(tag + " Erro msg: " + str(e))
-
-        def on_error(ws, error):
-            print(tag + " ERRO WS: " + str(type(error).__name__) + ": " + str(error))
-
-        def on_close(ws, close_code, msg):
-            print(tag + " Fechado. Reconectando em 5s...")
-            time.sleep(5)
-            threading.Thread(target=connect, daemon=True).start()
-
-        ws = websocket.WebSocketApp(
-            ws_url,
-            on_open=on_open, on_message=on_message,
-            on_error=on_error, on_close=on_close,
-        )
-        ws.run_forever(ping_interval=20, ping_timeout=10)
-
-    connect()
-
-
-# ---------------------------------------------------------------------------
-# Yahoo Finance — AUD/USD via yfinance
-# ---------------------------------------------------------------------------
-
 YAHOO_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
     "Accept": "application/json",
@@ -514,7 +346,7 @@ def detect_pattern(candles):
 
 
 # ---------------------------------------------------------------------------
-# Volume — fallback para dados com volume=0 (Yahoo/KuCoin forex)
+# Volume — fallback para dados com volume=0 (Yahoo/Yahoo Finance forex)
 # ---------------------------------------------------------------------------
 
 def volume_is_strong(candles):
@@ -919,7 +751,7 @@ def handle_command(text, chat_id):
         send_to(chat_id,
             "\U0001f44b Ola! Sou o <b>Bot Multi-Ativo BOT-N8</b>.\n\n"
             "<b>Ativos:</b> GBP/USD OTC | EUR/USD OTC | AUD/USD OTC\n"
-            "<b>Fontes:</b> KuCoin WS (GBP/EUR) | Yahoo Finance (AUD)\n\n"
+            "<b>Fontes:</b> Yahoo Finance (GBP/EUR/AUD)\n\n"
             "<b>Janelas (BRT):</b>\n"
             "\U0001f55b 09:00\u201311:00 \u2014 Londres\n"
             "\U0001f55d 14:00\u201316:00 \u2014 Londres+NY\n"
@@ -1261,19 +1093,14 @@ def signal_loop():
 def main():
     print("=" * 60)
     print("Bot Multi-Ativo BOT-N8 iniciado!")
-    print("GBP/USD: KuCoin WS | EUR/USD: KuCoin WS | AUD/USD: Yahoo Finance")
+    print("GBP/USD: Yahoo Finance | EUR/USD: Yahoo Finance | AUD/USD: Yahoo Finance")
     print("=" * 60)
     init_supabase()
 
-    # KuCoin WebSocket para GBP e EUR (M1 e M5)
-    for ak in ["GBP", "EUR"]:
-        threading.Thread(target=start_kucoin_ws, args=(ak, "m1"), daemon=True).start()
+    # Yahoo Finance para todos os ativos (GBP, EUR, AUD)
+    for ak in ["GBP", "EUR", "AUD"]:
+        threading.Thread(target=yahoo_update_loop, args=(ak,), daemon=True).start()
         time.sleep(1)
-        threading.Thread(target=start_kucoin_ws, args=(ak, "m5"), daemon=True).start()
-        time.sleep(1)
-
-    # Yahoo Finance para AUD
-    threading.Thread(target=yahoo_update_loop, args=("AUD",), daemon=True).start()
 
     # Polling Telegram
     threading.Thread(target=polling_loop, daemon=True).start()
