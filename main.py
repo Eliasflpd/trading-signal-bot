@@ -33,7 +33,7 @@ MAX_LOSSES_AM  = 6
 # Ativos
 # Todos os ativos: Yahoo Finance via requests HTTP (atualiza a cada 60s)
 # ---------------------------------------------------------------------------
-# EUR e AUD pausados temporariamente para calibracao — apenas GBP ativo
+# Foco: apenas GBP/USD OTC — EUR e AUD desativados temporariamente
 ASSETS = {
     "GBP": {"label": "GBP/USD OTC", "source": "yahoo", "symbol": "GBPUSD=X"},
     # "EUR": {"label": "EUR/USD OTC", "source": "yahoo", "symbol": "EURUSD=X"},
