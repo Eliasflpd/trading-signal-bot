@@ -33,10 +33,11 @@ MAX_LOSSES_AM  = 6
 # Ativos
 # Todos os ativos: Yahoo Finance via requests HTTP (atualiza a cada 60s)
 # ---------------------------------------------------------------------------
+# EUR e AUD pausados temporariamente para calibracao — apenas GBP ativo
 ASSETS = {
     "GBP": {"label": "GBP/USD OTC", "source": "yahoo", "symbol": "GBPUSD=X"},
-    "EUR": {"label": "EUR/USD OTC", "source": "yahoo", "symbol": "EURUSD=X"},
-    "AUD": {"label": "AUD/USD OTC", "source": "yahoo", "symbol": "AUDUSD=X"},
+    # "EUR": {"label": "EUR/USD OTC", "source": "yahoo", "symbol": "EURUSD=X"},
+    # "AUD": {"label": "AUD/USD OTC", "source": "yahoo", "symbol": "AUDUSD=X"},
 }
 
 # ---------------------------------------------------------------------------
@@ -46,7 +47,7 @@ ASSETS = {
 daily_signals    = 0
 daily_reset_date = ""
 daily_notified   = False
-last_signal_time = {"GBP": 0.0, "EUR": 0.0, "AUD": 0.0}
+last_signal_time = {"GBP": 0.0}  # EUR e AUD pausados
 bot_start_time   = time.time()
 last_update_id   = 0
 
@@ -57,14 +58,13 @@ stop_until         = 0.0
 current_bet        = BASE_BET_DEMO
 last_signal_id     = None
 
-asset_m1 = {"GBP": [], "EUR": [], "AUD": []}
-asset_m5 = {"GBP": [], "EUR": [], "AUD": []}
+asset_m1 = {"GBP": []}  # EUR e AUD pausados
+asset_m5 = {"GBP": []}  # EUR e AUD pausados
 data_lock = threading.Lock()
 
 asset_vwap = {
     "GBP": {"cum_tp_vol": 0.0, "cum_vol": 0.0, "value": None, "reset_hour": -1},
-    "EUR": {"cum_tp_vol": 0.0, "cum_vol": 0.0, "value": None, "reset_hour": -1},
-    "AUD": {"cum_tp_vol": 0.0, "cum_vol": 0.0, "value": None, "reset_hour": -1},
+    # EUR e AUD pausados
 }
 
 supa = None
@@ -529,7 +529,8 @@ def msg_signal(asset_key, direction, vol_strong, trend, ia_confianca=None, ia_ri
 
 def msg_new_day(date_str):
     return ("\U0001f7e2 <b>Novo dia iniciado!</b>\n"
-            "Monitorando GBP/USD | EUR/USD | AUD/USD\n"
+            "Monitorando: GBP/USD OTC (foco total)\n"
+            "EUR e AUD: pausados para calibracao\n"
             "Max. " + str(MAX_SIGNALS) + " sinais hoje.")
 
 
@@ -781,8 +782,6 @@ def handle_command(text, chat_id):
             paused = "\n\U0001f6d1 Pausado ate " + resume.strftime("%H:%M")
         with data_lock:
             gbp_m1 = len([c for c in asset_m1["GBP"] if c["is_closed"]])
-            eur_m1 = len([c for c in asset_m1["EUR"] if c["is_closed"]])
-            aud_m1 = len([c for c in asset_m1["AUD"] if c["is_closed"]])
         supabase_status = "Ativo \u2705" if supa is not None else "Desativado \u26a0\ufe0f (chave invalida)"
         msg = ("<b>Status BOT-N8 Multi-Ativo</b>\n"
                "Hora BRT: " + brt_now.strftime("%H:%M:%S") + "\n"
@@ -791,7 +790,11 @@ def handle_command(text, chat_id):
                "\U0001f4b0 Proxima entrada: $" + str(current_bet) + "\n"
                "Uptime: " + str(h_up) + "h " + str(m_up) + "m"
                + paused + "\n"
-               "\U0001f4ca Candles M1: GBP=" + str(gbp_m1) + " EUR=" + str(eur_m1) + " AUD=" + str(aud_m1) + "\n"
+               "\n"
+               "\U0001f7e2 <b>Monitorando: GBP/USD OTC (foco total)</b>\n"
+               "\u23f8 EUR e AUD: pausados para calibracao\n"
+               "\n"
+               "\U0001f4ca Candles M1: GBP=" + str(gbp_m1) + "\n"
                "\U0001f5c4 Supabase: " + supabase_status)
         vip_list = list_vip_active()
         vip_lines = "\n\U0001f451 <b>VIPs ativos:</b> " + str(len(vip_list))
