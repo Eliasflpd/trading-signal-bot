@@ -56,17 +56,23 @@ stop_until = 0.0
 # Anti-Martingale
 current_bet = BASE_BET_DEMO  # Valor atual da entrada
 
-last_signal_id = None   # UUID do ÃÂÃÂºltimo sinal inserido no Supabase
+last_signal_id = None   # UUID do ÃÂÃÂÃÂÃÂºltimo sinal inserido no Supabase
 
 m1_candles = []
 m5_candles = []
 data_lock = threading.Lock()
 
+# BOT-N8: VWAP
+vwap_cum_tp_vol = 0.0   # soma acumulada de (preco_tipico * volume)
+vwap_cum_vol    = 0.0   # soma acumulada de volume
+vwap_value      = None  # valor VWAP atual
+vwap_reset_hour = -1    # hora da última resetagem
+
 # Supabase client (inicializado no main)
 supa: Client = None
 
 # ---------------------------------------------------------------------------
-# Supabase ÃÂ¢ÃÂÃÂ Journaling
+# Supabase ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ Journaling
 # ---------------------------------------------------------------------------
 
 def init_supabase():
@@ -78,10 +84,10 @@ def init_supabase():
         except Exception as e:
             print("[Supabase] Erro ao inicializar: " + str(e))
     else:
-        print("[Supabase] URL/KEY nÃÂÃÂ£o configurados. Journaling desativado.")
+        print("[Supabase] URL/KEY nÃÂÃÂÃÂÃÂ£o configurados. Journaling desativado.")
 
 
-def log_signal(ativo, direcao, padrao, confianca, volume_confirmado, m5_confirmado, sessao, validado_ia=True, wick_signal=None, momentum_signal=None):
+def log_signal(ativo, direcao, padrao, confianca, volume_confirmado, m5_confirmado, sessao, validado_ia=True, wick_signal=None, momentum_signal=None, vwap_signal=None, vwap_distance=None):
     global last_signal_id
     if supa is None:
         return
@@ -97,6 +103,8 @@ def log_signal(ativo, direcao, padrao, confianca, volume_confirmado, m5_confirma
             "validado_ia": validado_ia,
             "wick_signal": wick_signal,
             "momentum_signal": momentum_signal,
+            "vwap_signal": vwap_signal,
+            "vwap_distance": vwap_distance,
             "resultado": "pendente",
             "registrado_em": datetime.utcnow().isoformat(),
         }
@@ -132,7 +140,7 @@ def get_weekly_stats():
         losses = sum(1 for r in rows if r["resultado"] == "LOSS")
         win_rate = int(wins / total * 100) if total > 0 else 0
 
-        # Melhor padrÃÂÃÂ£o
+        # Melhor padrÃÂÃÂÃÂÃÂ£o
         pattern_stats = {}
         for r in rows:
             p = r.get("padrao") or "N/A"
@@ -144,7 +152,7 @@ def get_weekly_stats():
         best_pattern = max(pattern_stats, key=lambda k: pattern_stats[k]["wins"] / pattern_stats[k]["total"] if pattern_stats[k]["total"] > 0 else 0)
         best_pattern_rate = int(pattern_stats[best_pattern]["wins"] / pattern_stats[best_pattern]["total"] * 100) if pattern_stats[best_pattern]["total"] > 0 else 0
 
-        # Melhor sessÃÂÃÂ£o
+        # Melhor sessÃÂÃÂÃÂÃÂ£o
         session_stats = {}
         for r in rows:
             s = r.get("sessao") or "N/A"
@@ -194,11 +202,11 @@ def get_daily_stats():
 
         return {"total": total, "wins": wins, "losses": losses, "win_rate": win_rate, "best_pattern": best_pattern}
     except Exception as e:
-        print("[Supabase] Erro stats diÃÂÃÂ¡rias: " + str(e))
+        print("[Supabase] Erro stats diÃÂÃÂÃÂÃÂ¡rias: " + str(e))
         return None
 
 # ---------------------------------------------------------------------------
-# UtilitÃÂÃÂ¡rios de tempo
+# UtilitÃÂÃÂÃÂÃÂ¡rios de tempo
 # ---------------------------------------------------------------------------
 
 def now_brt():
@@ -216,7 +224,7 @@ def active_session():
 
 
 # ---------------------------------------------------------------------------
-# WebSocket Binance ÃÂ¢ÃÂÃÂ M1
+# WebSocket Binance ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ M1
 # ---------------------------------------------------------------------------
 
 def on_m1_message(ws, message):
@@ -262,7 +270,7 @@ def start_m1_ws():
 
 
 # ---------------------------------------------------------------------------
-# WebSocket Binance ÃÂ¢ÃÂÃÂ M5
+# WebSocket Binance ÃÂÃÂ¢ÃÂÃÂÃÂÃÂ M5
 # ---------------------------------------------------------------------------
 
 def on_m5_message(ws, message):
@@ -392,7 +400,7 @@ def m5_trend():
 
 
 # ---------------------------------------------------------------------------
-# NotÃÂÃÂ­cias econÃÂÃÂ´micas
+# NotÃÂÃÂÃÂÃÂ­cias econÃÂÃÂÃÂÃÂ´micas
 # ---------------------------------------------------------------------------
 
 NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -469,21 +477,30 @@ def get_updates(offset=0):
 # Mensagens
 # ---------------------------------------------------------------------------
 
-def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None, bet=None):
+def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None, bet=None, wick_label=None, mom_label=None, vwap_label=None):
     vol_icon = "Alto \u2705" if vol_strong else "Baixo \u26a0\ufe0f"
     ia_linha = ""
     if ia_confianca is not None:
-        ia_linha = " | \U0001f916 IA: Validado \u2705 | ConfianÃÂ§a: " + str(ia_confianca) + "%"
+        ia_linha = "\n\U0001f916 IA: Validado \u2705 | Confiança: " + str(ia_confianca) + "%"
         if ia_risco:
             ia_linha += " | Risco: " + ia_risco
     bet_linha = ""
     if bet is not None:
         bet_linha = "\n\U0001f4b0 Entrada: $" + str(bet)
+    vwap_linha = ""
+    if vwap_label:
+        vwap_linha = "\n\U0001f3e6 VWAP: " + vwap_label
+    wick_linha = ""
+    if wick_label:
+        wick_linha = "\n\U0001f56f Pavio: " + wick_label + " \u2705"
+    mom_linha = ""
+    if mom_label:
+        mom_linha = "\n\U0001f4c8 Momentum: " + mom_label + " \u2705"
     if direction == "CALL":
         trend_icon = "Alta \u2705" if trend == "UP" else ("Baixa \u26a0\ufe0f" if trend == "DOWN" else "\u2014")
         return (
             "\U0001f7e2 <b>COMPRE \u2014 GBP/USD OTC</b>\n"
-            "\u23f1 Tempo: 1 minuto" + ia_linha + "\n"
+            "\u23f1 Tempo: 1 minuto" + vwap_linha + wick_linha + mom_linha + ia_linha + "\n"
             "\U0001f4ca Volume: " + vol_icon + " | M5: " + trend_icon + "\n"
             "\u27a1\ufe0f Clique no bot\u00e3o VERDE\n"
             "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha
@@ -492,11 +509,12 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None, b
         trend_icon = "Baixa \u2705" if trend == "DOWN" else ("Alta \u26a0\ufe0f" if trend == "UP" else "\u2014")
         return (
             "\U0001f534 <b>VENDA \u2014 GBP/USD OTC</b>\n"
-            "\u23f1 Tempo: 1 minuto" + ia_linha + wick_linha + mom_linha + "\n"
+            "\u23f1 Tempo: 1 minuto" + vwap_linha + wick_linha + mom_linha + ia_linha + "\n"
             "\U0001f4ca Volume: " + vol_icon + " | M5: " + trend_icon + "\n"
             "\u27a1\ufe0f Clique no bot\u00e3o VERMELHO\n"
             "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha
         )
+
 
 def msg_warning():
     return "\u26a1 20 segundos! Clique logo!\n\U0001f7e2 VERDE = COMPRE\n\U0001f534 VERMELHO = VENDA"
@@ -526,7 +544,7 @@ def record_loss():
         stop_until = time.time() + 86400  # Pausa ate amanha
         current_bet = BASE_BET_DEMO       # Reset do valor
         return "6", ""
-    # MantÃ©m pausa de 1h apos 3 perdas seguidas (BOT-N2 feature)
+    # MantÃÂ©m pausa de 1h apos 3 perdas seguidas (BOT-N2 feature)
     if consecutive_losses >= 3:
         stop_until = time.time() + 3600
         resume_dt = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
@@ -543,7 +561,7 @@ def record_win():
 
 
 # ---------------------------------------------------------------------------
-# RelatÃÂÃÂ³rio diÃÂÃÂ¡rio automÃÂÃÂ¡tico (23:59 BRT)
+# RelatÃÂÃÂÃÂÃÂ³rio diÃÂÃÂÃÂÃÂ¡rio automÃÂÃÂÃÂÃÂ¡tico (23:59 BRT)
 # ---------------------------------------------------------------------------
 
 _daily_report_sent_date = None
@@ -564,7 +582,7 @@ def check_daily_report():
                 "Padr\u00e3o mais certeiro: " + stats["best_pattern"]
             )
             send_telegram(msg)
-            print("[RelatÃÂÃÂ³rio] Resumo diÃÂÃÂ¡rio enviado.")
+            print("[RelatÃÂÃÂÃÂÃÂ³rio] Resumo diÃÂÃÂÃÂÃÂ¡rio enviado.")
 
 
 # ---------------------------------------------------------------------------
@@ -622,14 +640,22 @@ def handle_command(text, chat_id):
         vip_count = len(vip_members_list)
         vip_lines = "\n\U0001f451 <b>Membros VIP ativos:</b> " + str(vip_count)
         if vip_members_list:
-            # PrÃ³ximas expiraÃ§Ãµes (top 3)
+            # PrÃÂ³ximas expiraÃÂ§ÃÂµes (top 3)
             sorted_vips = sorted(vip_members_list, key=lambda x: x.get("expira_em",""))
-            vip_lines += "\n<b>PrÃ³ximas expiraÃ§Ãµes:</b>"
+            vip_lines += "\n<b>PrÃÂ³ximas expiraÃÂ§ÃÂµes:</b>"
             for v in sorted_vips[:3]:
                 nome_v = v.get("nome") or v["telegram_id"]
                 exp_v  = v.get("expira_em","?")[:10] if v.get("expira_em") else "?"
-                vip_lines += "\n\u2022 " + nome_v + " â " + exp_v
-        send_to(chat_id, msg + vip_lines)
+                vip_lines += "\n\u2022 " + nome_v + " Ã¢ÂÂ " + exp_v
+        # BOT-N8: VWAP info
+        vwap_val, price_now = get_current_vwap()
+        vwap_info = ""
+        if vwap_val and price_now:
+            vwap_info = ("\n\n\U0001f4b9 <b>VWAP Institucional</b>\n"
+                + "\U0001f4b9 VWAP atual: " + str(round(vwap_val, 5)) + "\n"
+                + "\U0001f4cd Pre\u00e7o: " + str(round(price_now, 5))
+                + (" (abaixo \u2014 zona de COMPRA)" if price_now < vwap_val else " (acima \u2014 zona de VENDA)"))
+        send_to(chat_id, msg + vip_lines + vwap_info)
 
     elif text == "/perdi":
         triggered, resume_time = record_loss()
@@ -712,10 +738,10 @@ def handle_command(text, chat_id):
             # Mensagem de boas-vindas para o VIP
             send_to(tid,
                 "\U0001f389 Bem-vindo ao Sinais IQ Option VIP!\n\n"
-                "VocÃª receberÃ¡ sinais automÃ¡ticos de\n"
+                "VocÃÂª receberÃÂ¡ sinais automÃÂ¡ticos de\n"
                 "GBP/USD OTC diretamente aqui.\n\n"
                 "\u2705 Acesso ativo por " + str(dias) + " dias\n"
-                "\U0001f4f1 Qualquer dÃºvida fale com o admin."
+                "\U0001f4f1 Qualquer dÃÂºvida fale com o admin."
             )
             send_to(chat_id, "\u2705 VIP ativado para " + tid + " por " + str(dias) + " dias")
         else:
@@ -780,17 +806,17 @@ def polling_loop():
 
 
 # ---------------------------------------------------------------------------
-# BOT-N4: ValidaÃÂ§ÃÂ£o via Claude API
+# BOT-N4: ValidaÃÂÃÂ§ÃÂÃÂ£o via Claude API
 # ---------------------------------------------------------------------------
 
 def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
     if not ANTHROPIC_API_KEY:
-        print("[Claude] ANTHROPIC_API_KEY nÃÂ£o configurada. Pulando validaÃÂ§ÃÂ£o IA.")
-        return True, 70, "API key nÃÂ£o configurada", "MÃÂDIO"
+        print("[Claude] ANTHROPIC_API_KEY nÃÂÃÂ£o configurada. Pulando validaÃÂÃÂ§ÃÂÃÂ£o IA.")
+        return True, 70, "API key nÃÂÃÂ£o configurada", "MÃÂÃÂDIO"
     try:
         brt_now = now_brt().strftime("%H:%M BRT")
         sess_idx, sess_info = active_session()
-        sessao_nome = sess_info[4] if sess_info else "Fora de sessÃÂ£o"
+        sessao_nome = sess_info[4] if sess_info else "Fora de sessÃÂÃÂ£o"
         vol_vs_media = "Alto" if vol_strong else "Baixo"
         trend_label = "Alta" if trend == "UP" else ("Baixa" if trend == "DOWN" else "Lateral")
         closed = [c for c in candles_m1 if c["is_closed"]]
@@ -802,19 +828,19 @@ def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
                          + " L=" + str(round(c["low"],5))
                          + " C=" + str(round(c["close"],5)) + "\n")
         prompt = (
-            "VocÃÂª ÃÂ© um trader profissional especializado em opÃÂ§ÃÂµes binÃÂ¡rias OTC. "
-            "Analise estes dados e decida se o sinal ÃÂ© VÃÂLIDO ou INVÃÂLIDO.\n\n"
+            "VocÃÂÃÂª ÃÂÃÂ© um trader profissional especializado em opÃÂÃÂ§ÃÂÃÂµes binÃÂÃÂ¡rias OTC. "
+            "Analise estes dados e decida se o sinal ÃÂÃÂ© VÃÂÃÂLIDO ou INVÃÂÃÂLIDO.\n\n"
             "Dados:\n"
             "- Ativo: GBP/USD OTC\n"
-            "- DireÃÂ§ÃÂ£o detectada: " + direction + "\n"
-            "- PadrÃÂ£o de vela: " + str(pattern) + "\n"
-            "- Volume vs mÃÂ©dia: " + vol_vs_media + "\n"
-            "- TendÃÂªncia M5: " + trend_label + "\n"
-            "- HorÃÂ¡rio BRT: " + brt_now + "\n"
-            "- SessÃÂ£o ativa: " + sessao_nome + "\n"
-            "- ÃÂltimas 5 velas (open, high, low, close):\n" + velas_str + "\n"
-            "Responda APENAS em JSON vÃÂ¡lido (sem markdown):\n"
-            '{"validar": true, "confianca": 80, "motivo": "explicaÃÂ§ÃÂ£o", "risco": "BAIXO"}'
+            "- DireÃÂÃÂ§ÃÂÃÂ£o detectada: " + direction + "\n"
+            "- PadrÃÂÃÂ£o de vela: " + str(pattern) + "\n"
+            "- Volume vs mÃÂÃÂ©dia: " + vol_vs_media + "\n"
+            "- TendÃÂÃÂªncia M5: " + trend_label + "\n"
+            "- HorÃÂÃÂ¡rio BRT: " + brt_now + "\n"
+            "- SessÃÂÃÂ£o ativa: " + sessao_nome + "\n"
+            "- ÃÂÃÂltimas 5 velas (open, high, low, close):\n" + velas_str + "\n"
+            "Responda APENAS em JSON vÃÂÃÂ¡lido (sem markdown):\n"
+            '{"validar": true, "confianca": 80, "motivo": "explicaÃÂÃÂ§ÃÂÃÂ£o", "risco": "BAIXO"}'
         )
         client_ia = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client_ia.messages.create(
@@ -831,12 +857,12 @@ def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
         valido    = bool(res.get("validar", False))
         confianca = int(res.get("confianca", 0))
         motivo    = str(res.get("motivo", ""))
-        risco     = str(res.get("risco", "MÃÂDIO"))
-        print("[Claude] validar=" + str(valido) + " confianÃÂ§a=" + str(confianca) + "% risco=" + risco)
+        risco     = str(res.get("risco", "MÃÂÃÂDIO"))
+        print("[Claude] validar=" + str(valido) + " confianÃÂÃÂ§a=" + str(confianca) + "% risco=" + risco)
         return valido, confianca, motivo, risco
     except Exception as e:
         print("[Claude] Erro: " + str(e))
-        return True, 65, "Erro na API, sinal liberado", "MÃÂDIO"
+        return True, 65, "Erro na API, sinal liberado", "MÃÂÃÂDIO"
 
 
 
@@ -945,16 +971,16 @@ def send_signal_to_vips(signal_text):
 
 
 # ---------------------------------------------------------------------------
-# BOT-N7: Análise de Pavios (Wicks) e Momentum
+# BOT-N7: AnÃ¡lise de Pavios (Wicks) e Momentum
 # ---------------------------------------------------------------------------
 
 def analyze_wicks(candles):
     """
-    Analisa pavios das últimas 3 velas.
+    Analisa pavios das Ãºltimas 3 velas.
     Retorna (wick_direction, wick_label, confidence_bonus)
       wick_direction: 'CALL', 'PUT' ou None
-      wick_label: descrição do pavio detectado
-      confidence_bonus: bônus de confiança (0, 15 ou 20)
+      wick_label: descriÃ§Ã£o do pavio detectado
+      confidence_bonus: bÃ´nus de confianÃ§a (0, 15 ou 20)
     """
     closed = [c for c in candles if c["is_closed"]]
     if len(closed) < 3:
@@ -976,18 +1002,18 @@ def analyze_wicks(candles):
         lower_wick = min(o, c_close) - l
         upper_wick = h - max(o, c_close)
 
-        # Pavio inferior >= 2.5x corpo → rejeição de baixa → CALL
+        # Pavio inferior >= 2.5x corpo â rejeiÃ§Ã£o de baixa â CALL
         if lower_wick >= 2.5 * body:
-            results.append(("CALL", "Rejeição forte de baixa", 15))
-        # Pavio superior >= 2.5x corpo → rejeição de alta → PUT
+            results.append(("CALL", "RejeiÃ§Ã£o forte de baixa", 15))
+        # Pavio superior >= 2.5x corpo â rejeiÃ§Ã£o de alta â PUT
         elif upper_wick >= 2.5 * body:
-            results.append(("PUT", "Rejeição forte de alta", 15))
-        # Fakeout: pavio grande mas corpo na direção oposta (manipulação)
+            results.append(("PUT", "RejeiÃ§Ã£o forte de alta", 15))
+        # Fakeout: pavio grande mas corpo na direÃ§Ã£o oposta (manipulaÃ§Ã£o)
         elif upper_wick >= 1.5 * body and c_close < o:
-            # Preço subiu mas fechou abaixo → armadilha de alta → PUT
+            # PreÃ§o subiu mas fechou abaixo â armadilha de alta â PUT
             results.append(("PUT", "Fakeout institucional", 20))
         elif lower_wick >= 1.5 * body and c_close > o:
-            # Preço caiu mas fechou acima → armadilha de baixa → CALL
+            # PreÃ§o caiu mas fechou acima â armadilha de baixa â CALL
             results.append(("CALL", "Fakeout institucional", 20))
         else:
             results.append((None, None, 0))
@@ -1001,11 +1027,11 @@ def analyze_wicks(candles):
 
 def analyze_momentum(candles):
     """
-    Analisa momentum das últimas 5 velas.
+    Analisa momentum das Ãºltimas 5 velas.
     Retorna (momentum_direction, momentum_label, confidence_bonus)
       momentum_direction: 'CALL', 'PUT' ou None
-      momentum_label: descrição do momentum
-      confidence_bonus: bônus de confiança
+      momentum_label: descriÃ§Ã£o do momentum
+      confidence_bonus: bÃ´nus de confianÃ§a
     """
     closed = [c for c in candles if c["is_closed"]]
     if len(closed) < 5:
@@ -1016,50 +1042,149 @@ def analyze_momentum(candles):
     closes = [c["close"] for c in last5]
     opens_ = [c["open"] for c in last5]
 
-    # Doji na última vela?
+    # Doji na Ãºltima vela?
     last = last5[-1]
     full_range = last["high"] - last["low"]
     last_body = bodies[-1]
     is_doji = (full_range > 0) and (last_body / full_range < 0.10)
 
-    # Direção predominante das 3 velas antes do doji
+    # DireÃ§Ã£o predominante das 3 velas antes do doji
     bull_count = sum(1 for i in range(2) if closes[i] > opens_[i])
     bear_count = sum(1 for i in range(2) if closes[i] < opens_[i])
 
     if is_doji and bull_count >= 2:
-        # Doji após 2+ altas → pausa antes de reversão → PUT
-        return "PUT", "Doji de exaustão altista", 15
+        # Doji apÃ³s 2+ altas â pausa antes de reversÃ£o â PUT
+        return "PUT", "Doji de exaustÃ£o altista", 15
     if is_doji and bear_count >= 2:
-        # Doji após 2+ baixas → pausa antes de reversão → CALL
-        return "CALL", "Doji de exaustão baixista", 15
+        # Doji apÃ³s 2+ baixas â pausa antes de reversÃ£o â CALL
+        return "CALL", "Doji de exaustÃ£o baixista", 15
 
-    # Exaustão: corpos decrescentes consecutivos (momentum caindo)
+    # ExaustÃ£o: corpos decrescentes consecutivos (momentum caindo)
     decreasing = sum(1 for i in range(1, 5) if bodies[i] < bodies[i-1])
     increasing = sum(1 for i in range(1, 5) if bodies[i] > bodies[i-1])
 
     if decreasing >= 3:
-        # Momentum caindo → reversão iminente
-        # Verifica direção predominante para saber para onde vai reverter
+        # Momentum caindo â reversÃ£o iminente
+        # Verifica direÃ§Ã£o predominante para saber para onde vai reverter
         bull_prev = sum(1 for i in range(4) if closes[i] > opens_[i])
         bear_prev = sum(1 for i in range(4) if closes[i] < opens_[i])
         if bull_prev >= 3:
-            return "PUT", "Exaustão de alta (reversão)", 15
+            return "PUT", "ExaustÃ£o de alta (reversÃ£o)", 15
         elif bear_prev >= 3:
-            return "CALL", "Exaustão de baixa (reversão)", 15
-        return None, "Exaustão sem direção clara", 0
+            return "CALL", "ExaustÃ£o de baixa (reversÃ£o)", 15
+        return None, "ExaustÃ£o sem direÃ§Ã£o clara", 0
 
     if increasing >= 3:
-        # Momentum crescendo → confirma tendência atual
+        # Momentum crescendo â confirma tendÃªncia atual
         last_dir = "CALL" if closes[-1] > opens_[-1] else "PUT"
-        return last_dir, "Aceleração de tendência", 10
+        return last_dir, "AceleraÃ§Ã£o de tendÃªncia", 10
 
     return None, None, 0
+
+
+
+# ---------------------------------------------------------------------------
+# BOT-N8: VWAP Institucional
+# ---------------------------------------------------------------------------
+
+def update_vwap(candles):
+    """Atualiza VWAP com as últimas 60 velas M1. Reseta a cada sessão."""
+    global vwap_cum_tp_vol, vwap_cum_vol, vwap_value, vwap_reset_hour
+    brt_now = now_brt()
+    current_hour = brt_now.hour
+
+    # Reseta VWAP no início de cada sessão (9h, 14h, 21h BRT)
+    session_hours = [9, 14, 21]
+    if current_hour in session_hours and vwap_reset_hour != current_hour:
+        vwap_cum_tp_vol = 0.0
+        vwap_cum_vol    = 0.0
+        vwap_value      = None
+        vwap_reset_hour = current_hour
+        print("[VWAP] Reset para sessão das " + str(current_hour) + "h.")
+
+    closed = [c for c in candles if c["is_closed"]]
+    if not closed:
+        return
+
+    # Calcula com as últimas 60 velas fechadas
+    window_candles = closed[-60:]
+    tp_vol_sum = sum(((c["high"] + c["low"] + c["close"]) / 3.0) * c["volume"] for c in window_candles)
+    vol_sum    = sum(c["volume"] for c in window_candles)
+
+    if vol_sum > 0:
+        vwap_value = tp_vol_sum / vol_sum
+    else:
+        vwap_value = None
+
+
+def get_vwap_signal(direction, candles):
+    """
+    Verifica posição do preço em relação ao VWAP.
+    Retorna (vwap_signal_label, vwap_distance_pct, vwap_bonus, should_ignore)
+    """
+    update_vwap(candles)
+
+    if vwap_value is None or vwap_value == 0:
+        return None, 0.0, 0, False
+
+    closed = [c for c in candles if c["is_closed"]]
+    if not closed:
+        return None, 0.0, 0, False
+
+    current_price = closed[-1]["close"]
+    distance_pct  = (current_price - vwap_value) / vwap_value * 100.0
+    abs_dist      = abs(distance_pct)
+
+    # Zona neutra: dentro de 0.01%
+    NEUTRAL_ZONE = 0.01
+    if abs_dist <= NEUTRAL_ZONE:
+        return "Neutro", round(distance_pct, 4), 0, False
+
+    price_above_vwap = current_price > vwap_value
+    price_below_vwap = current_price < vwap_value
+
+    # Bonus por distância
+    distance_bonus = 0
+    if abs_dist > 0.2:
+        distance_bonus = 15
+    elif abs_dist > 0.1:
+        distance_bonus = 10
+
+    if direction == "CALL" and price_below_vwap:
+        # Preço abaixo do VWAP → confirma CALL
+        label = "Abaixo \u2705 (+" + str(round(abs_dist, 3)) + "%)"
+        return label, round(distance_pct, 4), 20 + distance_bonus, False
+
+    elif direction == "PUT" and price_above_vwap:
+        # Preço acima do VWAP → confirma PUT
+        label = "Acima \u2705 (+" + str(round(abs_dist, 3)) + "%)"
+        return label, round(distance_pct, 4), 20 + distance_bonus, False
+
+    elif direction == "CALL" and price_above_vwap:
+        # Preço acima do VWAP → contradiz CALL → ignora
+        print("[VWAP] Preço acima do VWAP. CALL ignorado.")
+        return "Acima \u26a0\ufe0f", round(distance_pct, 4), 0, True
+
+    elif direction == "PUT" and price_below_vwap:
+        # Preço abaixo do VWAP → contradiz PUT → ignora
+        print("[VWAP] Preço abaixo do VWAP. PUT ignorado.")
+        return "Abaixo \u26a0\ufe0f", round(distance_pct, 4), 0, True
+
+    return None, 0.0, 0, False
+
+
+def get_current_vwap():
+    """Retorna o valor atual do VWAP e preço."""
+    closed = [c for c in m1_candles if c["is_closed"]]
+    if closed and vwap_value:
+        return vwap_value, closed[-1]["close"]
+    return None, None
 
 
 def signal_loop():
     global last_signal_time, current_bet
     global session_signals, session_notified, session_ended
-    last_vip_check = 0.0  # BOT-N5: controle de verificaÃ§Ã£o VIP
+    last_vip_check = 0.0  # BOT-N5: controle de verificaÃÂ§ÃÂ£o VIP
 
     print("Aguardando dados do WebSocket...")
     for _ in range(60):
@@ -1080,12 +1205,12 @@ def signal_loop():
             ts  = now_brt().strftime("%H:%M:%S BRT")
             now = time.time()
 
-            # RelatÃÂÃÂ³rio diÃÂÃÂ¡rio
+            # RelatÃÂÃÂÃÂÃÂ³rio diÃÂÃÂÃÂÃÂ¡rio
             check_daily_report()
 
             if now < stop_until:
                 resume = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
-                print("[" + ts + "] Pausado atÃÂÃÂ© " + resume.strftime("%H:%M"))
+                print("[" + ts + "] Pausado atÃÂÃÂÃÂÃÂ© " + resume.strftime("%H:%M"))
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -1101,11 +1226,11 @@ def signal_loop():
                     session_ended[i]    = False
                     session_signals[i]  = 0
                     send_telegram(msg_session_start(name, sh, sm, eh, em))
-                    print("[" + ts + "] SessÃÂÃÂ£o " + name + " aberta.")
+                    print("[" + ts + "] SessÃÂÃÂÃÂÃÂ£o " + name + " aberta.")
                 if not is_on and session_notified[i] and not session_ended[i]:
                     session_ended[i] = True
                     send_telegram(msg_session_end(name))
-                    print("[" + ts + "] SessÃÂÃÂ£o " + name + " encerrada.")
+                    print("[" + ts + "] SessÃÂÃÂÃÂÃÂ£o " + name + " encerrada.")
 
             if idx is None:
                 time.sleep(CHECK_INTERVAL)
@@ -1126,9 +1251,9 @@ def signal_loop():
 
             blocked, mins, return_time = check_news_block()
             if blocked:
-                msg_news = ("\u26a0\ufe0f NotÃÂÃÂ­cia importante em " + str(mins) + " minutos!\nPausando sinais por seguranÃÂÃÂ§a.\nRetorno em: " + return_time)
+                msg_news = ("\u26a0\ufe0f NotÃÂÃÂÃÂÃÂ­cia importante em " + str(mins) + " minutos!\nPausando sinais por seguranÃÂÃÂÃÂÃÂ§a.\nRetorno em: " + return_time)
                 send_telegram(msg_news)
-                print("[" + ts + "] NotÃÂÃÂ­cia em " + str(mins) + "min.")
+                print("[" + ts + "] NotÃÂÃÂÃÂÃÂ­cia em " + str(mins) + "min.")
                 time.sleep(max(60, mins * 60))
                 continue
 
@@ -1145,7 +1270,7 @@ def signal_loop():
 
             direction, pattern = detect_pattern(all_m1)
             if direction is None:
-                print("[" + ts + "] Nenhum padrÃÂÃÂ£o.")
+                print("[" + ts + "] Nenhum padrÃÂÃÂÃÂÃÂ£o.")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -1166,8 +1291,8 @@ def signal_loop():
                     time.sleep(CHECK_INTERVAL)
                     continue
 
-            # Calcula confianÃÂÃÂ§a (0-100)
-            # BOT-N7: Análise de Pavios e Momentum
+            # Calcula confianÃÂÃÂÃÂÃÂ§a (0-100)
+            # BOT-N7: AnÃ¡lise de Pavios e Momentum
             wick_dir, wick_label, wick_bonus       = analyze_wicks(all_m1)
             mom_dir,  mom_label,  mom_bonus        = analyze_momentum(all_m1)
 
@@ -1181,16 +1306,23 @@ def signal_loop():
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            # Calcula confiança base + bônus N7
+            # Calcula confianÃ§a base + bÃ´nus N7
             confianca = 50
             if vol_strong: confianca += 25
             if trend is not None: confianca += 25
             confianca += wick_bonus
             confianca += mom_bonus
+
+            # BOT-N8: VWAP Institucional
+            vwap_label, vwap_dist, vwap_bonus, vwap_ignore = get_vwap_signal(direction, m1_snap)
+            if vwap_ignore:
+                time.sleep(CHECK_INTERVAL)
+                continue
+            confianca += vwap_bonus
             confianca = min(confianca, 100)
 
             ts2 = now_brt().strftime("%H:%M:%S BRT")
-            # BOT-N4: ValidaÃÂ§ÃÂ£o via Claude API
+            # BOT-N4: ValidaÃÂÃÂ§ÃÂÃÂ£o via Claude API
             ia_valido, ia_confianca, ia_motivo, ia_risco = validate_with_claude(
                 direction, pattern, vol_strong, trend, m1_snap
             )
@@ -1199,11 +1331,11 @@ def signal_loop():
                 time.sleep(CHECK_INTERVAL)
                 continue
             if ia_confianca < 65:
-                print("[IA] ConfianÃÂ§a insuficiente: " + str(ia_confianca) + "%. Ignorando.")
+                print("[IA] ConfianÃÂÃÂ§a insuficiente: " + str(ia_confianca) + "%. Ignorando.")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            signal_text = msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco, bet=current_bet, wick_label=wick_label, mom_label=mom_label)
+            signal_text = msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco, bet=current_bet, wick_label=wick_label, mom_label=mom_label, vwap_label=vwap_label)
             ok  = send_telegram(signal_text)
             if ok:
                 last_signal_time     = time.time()
@@ -1225,6 +1357,8 @@ def signal_loop():
                     validado_ia=True,
                     wick_signal=wick_label,
                     momentum_signal=mom_label,
+                    vwap_signal=vwap_label,
+                    vwap_distance=vwap_dist,
                 )
             else:
                 print("[" + ts2 + "] Falha ao enviar sinal.")
@@ -1249,8 +1383,8 @@ def signal_loop():
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Bot GBP/USD OTC BOT-N7 iniciado!")
-    print("Features: WebSocket + Volume + MTF + Noticias + Stop Loss + Supabase Journaling + Claude AI + VIP + Anti-Martingale")
+    print("Bot GBP/USD OTC BOT-N8 iniciado!")
+    print("Features: WebSocket + Volume + MTF + Noticias + Stop Loss + Supabase Journaling + Claude AI + VIP + Anti-Martingale + VWAP")
     init_supabase()
     t_m1 = threading.Thread(target=start_m1_ws, daemon=True)
     t_m1.start()
