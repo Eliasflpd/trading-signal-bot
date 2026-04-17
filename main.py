@@ -20,12 +20,6 @@ ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 
 BRT_OFFSET = timedelta(hours=-3)
 
-SESSIONS = [
-    (9,  0, 11,  0, "Londres"),
-    (14, 0, 16,  0, "Londres+NY"),
-    (21, 0, 23, 59, "Noturna"),
-]
-
 COOLDOWN_SECS  = 300
 MAX_SIGNALS    = 6
 CHECK_INTERVAL = 30
@@ -49,9 +43,9 @@ ASSETS = {
 # Estado global
 # ---------------------------------------------------------------------------
 
-session_signals  = [0, 0, 0]
-session_notified = [False, False, False]
-session_ended    = [False, False, False]
+daily_signals    = 0
+daily_reset_date = ""
+daily_notified   = False
 last_signal_time = {"GBP": 0.0, "EUR": 0.0, "AUD": 0.0}
 bot_start_time   = time.time()
 last_update_id   = 0
@@ -198,16 +192,6 @@ def get_daily_stats():
 
 def now_brt():
     return datetime.now(timezone.utc) + BRT_OFFSET
-
-
-def active_session():
-    t = now_brt()
-    for i, (sh, sm, eh, em, name) in enumerate(SESSIONS):
-        start = t.replace(hour=sh, minute=sm, second=0,  microsecond=0)
-        end   = t.replace(hour=eh, minute=em, second=59, microsecond=999999)
-        if start <= t <= end:
-            return i, SESSIONS[i]
-    return None, None
 
 
 YAHOO_HEADERS = {
@@ -509,15 +493,10 @@ def msg_signal(asset_key, direction, vol_strong, trend, ia_confianca=None, ia_ri
                 "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha)
 
 
-def msg_session_start(name, sh, sm, eh, em):
-    return ("\U0001f7e2 <b>Sessao " + name + " iniciada!</b>\n"
-            "Monitorando GBP/USD | EUR/USD | AUD/USD OTC\n"
-            "Ate " + str(eh).zfill(2) + ":" + str(em).zfill(2)
-            + " \u2022 Max. " + str(MAX_SIGNALS) + " sinais totais")
-
-
-def msg_session_end(name):
-    return "\U0001f534 <b>Sessao " + name + " encerrada.</b>\nAte a proxima sessao!"
+def msg_new_day(date_str):
+    return ("\U0001f7e2 <b>Novo dia iniciado!</b>\n"
+            "Monitorando GBP/USD | EUR/USD | AUD/USD\n"
+            "Max. " + str(MAX_SIGNALS) + " sinais hoje.")
 
 
 # ---------------------------------------------------------------------------
@@ -751,23 +730,15 @@ def handle_command(text, chat_id):
         send_to(chat_id,
             "\U0001f44b Ola! Sou o <b>Bot Multi-Ativo BOT-N8</b>.\n\n"
             "<b>Ativos:</b> GBP/USD OTC | EUR/USD OTC | AUD/USD OTC\n"
-            "<b>Fontes:</b> Yahoo Finance (GBP/EUR/AUD)\n\n"
-            "<b>Janelas (BRT):</b>\n"
-            "\U0001f55b 09:00\u201311:00 \u2014 Londres\n"
-            "\U0001f55d 14:00\u201316:00 \u2014 Londres+NY\n"
-            "\U0001f315 21:00\u201323:59 \u2014 Noturna\n\n"
-            "<b>Max.:</b> 6 sinais/sessao (total 3 ativos)\n"
+            "<b>Fontes:</b> Yahoo Finance (GBP/EUR/AUD)\n"
+            "<b>Monitoramento:</b> 24h continuo \u267e\ufe0f\n\n"
+            "<b>Max.:</b> 6 sinais/dia (reseta a meia-noite)\n"
             "/status | /perdi | /ganhei | /placar | /relatorio\n"
             "<b>Admin:</b> /addvip | /removevip | /listvip")
 
     elif text == "/status":
         brt_now   = now_brt()
-        idx, sess = active_session()
-        if idx is not None:
-            sh, sm, eh, em, name = sess
-            sessao = "Ativa \u2705 (" + name + ") \u2022 " + str(session_signals[idx]) + "/" + str(MAX_SIGNALS) + " sinais"
-        else:
-            sessao = "Inativa \u23f8"
+        sessao = "Ativa 24h \u2705 \u2022 " + str(daily_signals) + "/" + str(MAX_SIGNALS) + " sinais hoje"
         up = timedelta(seconds=int(time.time()-bot_start_time))
         h_up = int(up.total_seconds()//3600); m_up = int((up.total_seconds()%3600)//60)
         paused = ""
@@ -915,9 +886,9 @@ def polling_loop():
 # Loop de sinais — multi-ativo
 # ---------------------------------------------------------------------------
 
-def check_asset_signal(asset_key, idx, name):
+def check_asset_signal(asset_key):
     """Verifica e envia sinal para um ativo. Retorna True se sinal enviado."""
-    global last_signal_time, current_bet, session_signals
+    global last_signal_time, current_bet, daily_signals
     ts  = now_brt().strftime("%H:%M:%S BRT")
     now = time.time()
 
@@ -991,15 +962,15 @@ def check_asset_signal(asset_key, idx, name):
 
     if send_telegram(signal_text):
         last_signal_time[asset_key] = time.time()
-        session_signals[idx] += 1
-        print("[" + ts2 + "] [" + name + "] [" + asset_key + "] " + direction
-              + " (" + str(pattern) + ") #" + str(session_signals[idx])
+        daily_signals += 1
+        print("[" + ts2 + "] [24h] [" + asset_key + "] " + direction
+              + " (" + str(pattern) + ") #" + str(daily_signals)
               + " IA=" + str(ia_confianca) + "%")
         vip_n = send_signal_to_vips(signal_text)
         if vip_n > 0: print("[VIP] " + str(vip_n) + " notificado(s).")
         log_signal(ativo=ASSETS[asset_key]["label"], direcao=direction, padrao=pattern,
                    confianca=ia_confianca, volume_confirmado=volume_is_strong(all_m1),
-                   m5_confirmado=(trend is not None), sessao=name, validado_ia=True,
+                   m5_confirmado=(trend is not None), sessao="24h", validado_ia=True,
                    wick_signal=wick_label, momentum_signal=mom_label,
                    vwap_signal=vwap_label, vwap_distance=vwap_dist)
         return True
@@ -1009,7 +980,7 @@ def check_asset_signal(asset_key, idx, name):
 
 
 def signal_loop():
-    global session_signals, session_notified, session_ended
+    global daily_signals, daily_reset_date, daily_notified
 
     print("Aguardando dados iniciais (max 120s por ativo)...")
     for ak in ASSETS:
@@ -1023,44 +994,37 @@ def signal_loop():
         else:
             print("[Init] Timeout " + ak + " — prosseguindo.")
 
-    print("Loop de sinais iniciado (BOT-N8 Multi-Ativo).")
+    print("Loop de sinais iniciado (BOT-N8 Multi-Ativo 24h).")
 
     while True:
         try:
-            ts  = now_brt().strftime("%H:%M:%S BRT")
-            now = time.time()
+            ts    = now_brt().strftime("%H:%M:%S BRT")
+            now   = time.time()
+            t_now = now_brt()
 
             check_daily_report()
+
+            # Reset diario a meia-noite
+            today_str = t_now.strftime("%d/%m/%Y")
+            if daily_reset_date != today_str:
+                daily_signals    = 0
+                daily_notified   = False
+                daily_reset_date = today_str
+                print("[" + ts + "] Novo dia: contagem de sinais resetada.")
+
+            # Aviso de novo dia as 00:00
+            if t_now.hour == 0 and t_now.minute == 0 and not daily_notified:
+                daily_notified = True
+                send_telegram(msg_new_day(today_str))
+                print("[" + ts + "] Aviso de novo dia enviado.")
 
             if now < stop_until:
                 resume = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
                 print("[" + ts + "] Pausado ate " + resume.strftime("%H:%M") + ".")
                 time.sleep(CHECK_INTERVAL); continue
 
-            idx, sess = active_session()
-
-            # Sessao start/end
-            t_now = now_brt()
-            for i, (sh, sm, eh, em, sname) in enumerate(SESSIONS):
-                start = t_now.replace(hour=sh, minute=sm, second=0,  microsecond=0)
-                end   = t_now.replace(hour=eh, minute=em, second=59, microsecond=999999)
-                is_on = (start <= t_now <= end)
-                if is_on and not session_notified[i]:
-                    session_notified[i]=True; session_ended[i]=False; session_signals[i]=0
-                    send_telegram(msg_session_start(sname, sh, sm, eh, em))
-                    print("[" + ts + "] Sessao " + sname + " iniciada.")
-                if not is_on and session_notified[i] and not session_ended[i]:
-                    session_ended[i]=True
-                    send_telegram(msg_session_end(sname))
-                    print("[" + ts + "] Sessao " + sname + " encerrada.")
-
-            if idx is None:
-                time.sleep(CHECK_INTERVAL); continue
-
-            sh, sm, eh, em, name = sess
-
-            if session_signals[idx] >= MAX_SIGNALS:
-                print("[" + ts + "] Max sinais: " + name + ".")
+            if daily_signals >= MAX_SIGNALS:
+                print("[" + ts + "] Max sinais do dia atingido.")
                 time.sleep(CHECK_INTERVAL); continue
 
             all_in_cd = all(now - last_signal_time[ak] < COOLDOWN_SECS for ak in ASSETS)
@@ -1072,8 +1036,8 @@ def signal_loop():
             # Rotacao por ativo
             signal_sent = False
             for ak in ASSETS:
-                if session_signals[idx] >= MAX_SIGNALS: break
-                if check_asset_signal(ak, idx, name):
+                if daily_signals >= MAX_SIGNALS: break
+                if check_asset_signal(ak):
                     signal_sent = True
                     time.sleep(30)
                     break
