@@ -6,7 +6,6 @@ import uuid
 import requests
 import threading
 import websocket
-import yfinance as yf
 from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import anthropic
@@ -224,14 +223,18 @@ KUCOIN_TOKEN_URL = "https://api.kucoin.com/api/v1/bullet-public"
 def get_kucoin_token():
     """Obtem token e endpoint para o WebSocket publico da KuCoin."""
     try:
-        r = requests.post(KUCOIN_TOKEN_URL, timeout=10)
+        print("[KuCoin] Solicitando token publico em " + KUCOIN_TOKEN_URL)
+        r = requests.post(KUCOIN_TOKEN_URL, timeout=15)
+        print("[KuCoin] HTTP status: " + str(r.status_code))
         r.raise_for_status()
         data = r.json()["data"]
         token    = data["token"]
         endpoint = data["instanceServers"][0]["endpoint"]
+        print("[KuCoin] Token obtido! Endpoint: " + endpoint)
+        print("[KuCoin] Token (primeiros 20 chars): " + token[:20] + "...")
         return token, endpoint
     except Exception as e:
-        print("[KuCoin] Erro ao obter token: " + str(e))
+        print("[KuCoin] ERRO ao obter token: " + str(type(e).__name__) + ": " + str(e))
         return None, None
 
 
@@ -271,12 +274,14 @@ def start_kucoin_ws(asset_key, timeframe):
     last_ts = [None]
 
     def connect():
+        print(tag + " Iniciando conexao KuCoin...")
         token, endpoint = get_kucoin_token()
         if not token:
-            print(tag + " Falha ao obter token. Retry em 10s.")
+            print(tag + " FALHA ao obter token. Retry em 10s.")
             time.sleep(10)
             threading.Thread(target=connect, daemon=True).start()
             return
+        print(tag + " Token OK. Preparando WebSocket...")
 
         connect_id = uuid.uuid4().hex
         ws_url = endpoint + "?token=" + token + "&connectId=" + connect_id
@@ -321,6 +326,7 @@ def start_kucoin_ws(asset_key, timeframe):
                     lst = candle_store[asset_key]
 
                     if last_ts[0] is None:
+                        print(tag + " PRIMEIRO CANDLE recebido! ts=" + str(ts) + " close=" + str(candles[2]))
                         last_ts[0] = ts
                         candle["is_closed"] = False
                         if lst and not lst[-1]["is_closed"]:
@@ -351,7 +357,7 @@ def start_kucoin_ws(asset_key, timeframe):
                 print(tag + " Erro msg: " + str(e))
 
         def on_error(ws, error):
-            print(tag + " Erro WS: " + str(error))
+            print(tag + " ERRO WS: " + str(type(error).__name__) + ": " + str(error))
 
         def on_close(ws, close_code, msg):
             print(tag + " Fechado. Reconectando em 5s...")
@@ -372,46 +378,65 @@ def start_kucoin_ws(asset_key, timeframe):
 # Yahoo Finance — AUD/USD via yfinance
 # ---------------------------------------------------------------------------
 
-def yf_candles_to_list(df, max_len=30):
-    if df is None or df.empty:
-        return []
-    candles = []
-    for _, row in df.iterrows():
-        try:
-            o = float(row["Open"])
-            h = float(row["High"])
-            l = float(row["Low"])
-            c = float(row["Close"])
-            v = float(row.get("Volume", 1.0) or 1.0)
-            if o == 0 or c == 0:
+YAHOO_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+    "Accept": "application/json",
+}
+
+def fetch_yahoo_chart(symbol, interval, range_val, max_len, tag):
+    """Busca candles direto da API Yahoo Finance v8 (sem yfinance)."""
+    base_url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol
+    params = "interval=" + interval + "&range=" + range_val
+    url = base_url + "?" + params
+    try:
+        print("[Yahoo] " + tag + " Buscando: interval=" + interval + " range=" + range_val)
+        r = requests.get(url, headers=YAHOO_HEADERS, timeout=15)
+        print("[Yahoo] " + tag + " HTTP " + str(r.status_code))
+        r.raise_for_status()
+        j = r.json()
+        result_data = j.get("chart", {}).get("result", [])
+        if not result_data:
+            err = j.get("chart", {}).get("error", "sem resultado")
+            print("[Yahoo] " + tag + " ERRO: " + str(err))
+            return []
+        res = result_data[0]
+        timestamps = res.get("timestamp", [])
+        q = res.get("indicators", {}).get("quote", [{}])[0]
+        opens  = q.get("open",  [])
+        highs  = q.get("high",  [])
+        lows   = q.get("low",   [])
+        closes = q.get("close", [])
+        vols   = q.get("volume",[])
+        candles = []
+        for i in range(len(timestamps)):
+            try:
+                o = opens[i] if i < len(opens) else None
+                h = highs[i] if i < len(highs) else None
+                l = lows[i]  if i < len(lows)  else None
+                c = closes[i]if i < len(closes) else None
+                v = vols[i]  if vols and i < len(vols) else 1.0
+                if o is None or c is None or o == 0 or c == 0:
+                    continue
+                candles.append({
+                    "open": float(o), "high": float(h), "low": float(l),
+                    "close": float(c), "volume": float(v or 1.0), "is_closed": True
+                })
+            except Exception:
                 continue
-            candles.append({"open": o, "high": h, "low": l, "close": c,
-                             "volume": v, "is_closed": True})
-        except Exception:
-            continue
-    return candles[-max_len:] if len(candles) > max_len else candles
+        result = candles[-max_len:] if len(candles) > max_len else candles
+        print("[Yahoo] " + tag + " " + str(len(result)) + " candles obtidos")
+        return result
+    except Exception as e:
+        print("[Yahoo] " + tag + " EXCECAO: " + str(type(e).__name__) + ": " + str(e))
+        return []
 
 
 def fetch_yahoo_candles_m1(symbol):
-    try:
-        df = yf.Ticker(symbol).history(period="1d", interval="1m")
-        result = yf_candles_to_list(df, 25)
-        print("[Yahoo] " + symbol + " M1: " + str(len(result)) + " candles")
-        return result
-    except Exception as e:
-        print("[Yahoo] Erro M1 " + symbol + ": " + str(e))
-        return []
+    return fetch_yahoo_chart(symbol, "1m", "1d", 25, symbol + " M1")
 
 
 def fetch_yahoo_candles_m5(symbol):
-    try:
-        df = yf.Ticker(symbol).history(period="5d", interval="5m")
-        result = yf_candles_to_list(df, 30)
-        print("[Yahoo] " + symbol + " M5: " + str(len(result)) + " candles")
-        return result
-    except Exception as e:
-        print("[Yahoo] Erro M5 " + symbol + ": " + str(e))
-        return []
+    return fetch_yahoo_chart(symbol, "5m", "5d", 30, symbol + " M5")
 
 
 def yahoo_update_loop(asset_key):
