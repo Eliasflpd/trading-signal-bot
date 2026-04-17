@@ -834,7 +834,8 @@ def handle_command(text, chat_id):
             "\U0001f3c6 <b>Vitoria registrada!</b>\n"
             "Anti-Martingale: sessao encerrada com lucro.\n"
             "\U0001f4b0 Proxima entrada: $" + str(BASE_BET_DEMO) + "\n"
-            "\U0001f4ca Placar hoje: " + str(session_wins) + " wins / " + str(session_losses) + " losses"
+            "\U0001f4ca Placar hoje: " + str(session_wins) + " wins / " + str(session_losses) + " losses\n"
+            "\u26a1 Aguarde o proximo sinal!"
         )
         send_to(chat_id, msg_ganhei)
 
