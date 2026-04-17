@@ -56,7 +56,7 @@ stop_until = 0.0
 # Anti-Martingale
 current_bet = BASE_BET_DEMO  # Valor atual da entrada
 
-last_signal_id = None   # UUID do ÃÂºltimo sinal inserido no Supabase
+last_signal_id = None   # UUID do ÃÂÃÂºltimo sinal inserido no Supabase
 
 m1_candles = []
 m5_candles = []
@@ -66,7 +66,7 @@ data_lock = threading.Lock()
 supa: Client = None
 
 # ---------------------------------------------------------------------------
-# Supabase Ã¢ÂÂ Journaling
+# Supabase ÃÂ¢ÃÂÃÂ Journaling
 # ---------------------------------------------------------------------------
 
 def init_supabase():
@@ -78,10 +78,10 @@ def init_supabase():
         except Exception as e:
             print("[Supabase] Erro ao inicializar: " + str(e))
     else:
-        print("[Supabase] URL/KEY nÃÂ£o configurados. Journaling desativado.")
+        print("[Supabase] URL/KEY nÃÂÃÂ£o configurados. Journaling desativado.")
 
 
-def log_signal(ativo, direcao, padrao, confianca, volume_confirmado, m5_confirmado, sessao, validado_ia=True):
+def log_signal(ativo, direcao, padrao, confianca, volume_confirmado, m5_confirmado, sessao, validado_ia=True, wick_signal=None, momentum_signal=None):
     global last_signal_id
     if supa is None:
         return
@@ -95,6 +95,8 @@ def log_signal(ativo, direcao, padrao, confianca, volume_confirmado, m5_confirma
             "m5_confirmado": m5_confirmado,
             "sessao": sessao,
             "validado_ia": validado_ia,
+            "wick_signal": wick_signal,
+            "momentum_signal": momentum_signal,
             "resultado": "pendente",
             "registrado_em": datetime.utcnow().isoformat(),
         }
@@ -130,7 +132,7 @@ def get_weekly_stats():
         losses = sum(1 for r in rows if r["resultado"] == "LOSS")
         win_rate = int(wins / total * 100) if total > 0 else 0
 
-        # Melhor padrÃÂ£o
+        # Melhor padrÃÂÃÂ£o
         pattern_stats = {}
         for r in rows:
             p = r.get("padrao") or "N/A"
@@ -142,7 +144,7 @@ def get_weekly_stats():
         best_pattern = max(pattern_stats, key=lambda k: pattern_stats[k]["wins"] / pattern_stats[k]["total"] if pattern_stats[k]["total"] > 0 else 0)
         best_pattern_rate = int(pattern_stats[best_pattern]["wins"] / pattern_stats[best_pattern]["total"] * 100) if pattern_stats[best_pattern]["total"] > 0 else 0
 
-        # Melhor sessÃÂ£o
+        # Melhor sessÃÂÃÂ£o
         session_stats = {}
         for r in rows:
             s = r.get("sessao") or "N/A"
@@ -192,11 +194,11 @@ def get_daily_stats():
 
         return {"total": total, "wins": wins, "losses": losses, "win_rate": win_rate, "best_pattern": best_pattern}
     except Exception as e:
-        print("[Supabase] Erro stats diÃÂ¡rias: " + str(e))
+        print("[Supabase] Erro stats diÃÂÃÂ¡rias: " + str(e))
         return None
 
 # ---------------------------------------------------------------------------
-# UtilitÃÂ¡rios de tempo
+# UtilitÃÂÃÂ¡rios de tempo
 # ---------------------------------------------------------------------------
 
 def now_brt():
@@ -214,7 +216,7 @@ def active_session():
 
 
 # ---------------------------------------------------------------------------
-# WebSocket Binance Ã¢ÂÂ M1
+# WebSocket Binance ÃÂ¢ÃÂÃÂ M1
 # ---------------------------------------------------------------------------
 
 def on_m1_message(ws, message):
@@ -260,7 +262,7 @@ def start_m1_ws():
 
 
 # ---------------------------------------------------------------------------
-# WebSocket Binance Ã¢ÂÂ M5
+# WebSocket Binance ÃÂ¢ÃÂÃÂ M5
 # ---------------------------------------------------------------------------
 
 def on_m5_message(ws, message):
@@ -390,7 +392,7 @@ def m5_trend():
 
 
 # ---------------------------------------------------------------------------
-# NotÃÂ­cias econÃÂ´micas
+# NotÃÂÃÂ­cias econÃÂÃÂ´micas
 # ---------------------------------------------------------------------------
 
 NEWS_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
@@ -471,7 +473,7 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None, b
     vol_icon = "Alto \u2705" if vol_strong else "Baixo \u26a0\ufe0f"
     ia_linha = ""
     if ia_confianca is not None:
-        ia_linha = " | \U0001f916 IA: Validado \u2705 | ConfianÃ§a: " + str(ia_confianca) + "%"
+        ia_linha = " | \U0001f916 IA: Validado \u2705 | ConfianÃÂ§a: " + str(ia_confianca) + "%"
         if ia_risco:
             ia_linha += " | Risco: " + ia_risco
     bet_linha = ""
@@ -490,7 +492,7 @@ def msg_signal(direction, vol_strong, trend, ia_confianca=None, ia_risco=None, b
         trend_icon = "Baixa \u2705" if trend == "DOWN" else ("Alta \u26a0\ufe0f" if trend == "UP" else "\u2014")
         return (
             "\U0001f534 <b>VENDA \u2014 GBP/USD OTC</b>\n"
-            "\u23f1 Tempo: 1 minuto" + ia_linha + "\n"
+            "\u23f1 Tempo: 1 minuto" + ia_linha + wick_linha + mom_linha + "\n"
             "\U0001f4ca Volume: " + vol_icon + " | M5: " + trend_icon + "\n"
             "\u27a1\ufe0f Clique no bot\u00e3o VERMELHO\n"
             "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha
@@ -524,7 +526,7 @@ def record_loss():
         stop_until = time.time() + 86400  # Pausa ate amanha
         current_bet = BASE_BET_DEMO       # Reset do valor
         return "6", ""
-    # Mantém pausa de 1h apos 3 perdas seguidas (BOT-N2 feature)
+    # MantÃ©m pausa de 1h apos 3 perdas seguidas (BOT-N2 feature)
     if consecutive_losses >= 3:
         stop_until = time.time() + 3600
         resume_dt = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
@@ -541,7 +543,7 @@ def record_win():
 
 
 # ---------------------------------------------------------------------------
-# RelatÃÂ³rio diÃÂ¡rio automÃÂ¡tico (23:59 BRT)
+# RelatÃÂÃÂ³rio diÃÂÃÂ¡rio automÃÂÃÂ¡tico (23:59 BRT)
 # ---------------------------------------------------------------------------
 
 _daily_report_sent_date = None
@@ -562,7 +564,7 @@ def check_daily_report():
                 "Padr\u00e3o mais certeiro: " + stats["best_pattern"]
             )
             send_telegram(msg)
-            print("[RelatÃÂ³rio] Resumo diÃÂ¡rio enviado.")
+            print("[RelatÃÂÃÂ³rio] Resumo diÃÂÃÂ¡rio enviado.")
 
 
 # ---------------------------------------------------------------------------
@@ -620,13 +622,13 @@ def handle_command(text, chat_id):
         vip_count = len(vip_members_list)
         vip_lines = "\n\U0001f451 <b>Membros VIP ativos:</b> " + str(vip_count)
         if vip_members_list:
-            # Próximas expirações (top 3)
+            # PrÃ³ximas expiraÃ§Ãµes (top 3)
             sorted_vips = sorted(vip_members_list, key=lambda x: x.get("expira_em",""))
-            vip_lines += "\n<b>Próximas expirações:</b>"
+            vip_lines += "\n<b>PrÃ³ximas expiraÃ§Ãµes:</b>"
             for v in sorted_vips[:3]:
                 nome_v = v.get("nome") or v["telegram_id"]
                 exp_v  = v.get("expira_em","?")[:10] if v.get("expira_em") else "?"
-                vip_lines += "\n\u2022 " + nome_v + " — " + exp_v
+                vip_lines += "\n\u2022 " + nome_v + " â " + exp_v
         send_to(chat_id, msg + vip_lines)
 
     elif text == "/perdi":
@@ -710,10 +712,10 @@ def handle_command(text, chat_id):
             # Mensagem de boas-vindas para o VIP
             send_to(tid,
                 "\U0001f389 Bem-vindo ao Sinais IQ Option VIP!\n\n"
-                "Você receberá sinais automáticos de\n"
+                "VocÃª receberÃ¡ sinais automÃ¡ticos de\n"
                 "GBP/USD OTC diretamente aqui.\n\n"
                 "\u2705 Acesso ativo por " + str(dias) + " dias\n"
-                "\U0001f4f1 Qualquer dúvida fale com o admin."
+                "\U0001f4f1 Qualquer dÃºvida fale com o admin."
             )
             send_to(chat_id, "\u2705 VIP ativado para " + tid + " por " + str(dias) + " dias")
         else:
@@ -778,17 +780,17 @@ def polling_loop():
 
 
 # ---------------------------------------------------------------------------
-# BOT-N4: ValidaÃ§Ã£o via Claude API
+# BOT-N4: ValidaÃÂ§ÃÂ£o via Claude API
 # ---------------------------------------------------------------------------
 
 def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
     if not ANTHROPIC_API_KEY:
-        print("[Claude] ANTHROPIC_API_KEY nÃ£o configurada. Pulando validaÃ§Ã£o IA.")
-        return True, 70, "API key nÃ£o configurada", "MÃDIO"
+        print("[Claude] ANTHROPIC_API_KEY nÃÂ£o configurada. Pulando validaÃÂ§ÃÂ£o IA.")
+        return True, 70, "API key nÃÂ£o configurada", "MÃÂDIO"
     try:
         brt_now = now_brt().strftime("%H:%M BRT")
         sess_idx, sess_info = active_session()
-        sessao_nome = sess_info[4] if sess_info else "Fora de sessÃ£o"
+        sessao_nome = sess_info[4] if sess_info else "Fora de sessÃÂ£o"
         vol_vs_media = "Alto" if vol_strong else "Baixo"
         trend_label = "Alta" if trend == "UP" else ("Baixa" if trend == "DOWN" else "Lateral")
         closed = [c for c in candles_m1 if c["is_closed"]]
@@ -800,19 +802,19 @@ def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
                          + " L=" + str(round(c["low"],5))
                          + " C=" + str(round(c["close"],5)) + "\n")
         prompt = (
-            "VocÃª Ã© um trader profissional especializado em opÃ§Ãµes binÃ¡rias OTC. "
-            "Analise estes dados e decida se o sinal Ã© VÃLIDO ou INVÃLIDO.\n\n"
+            "VocÃÂª ÃÂ© um trader profissional especializado em opÃÂ§ÃÂµes binÃÂ¡rias OTC. "
+            "Analise estes dados e decida se o sinal ÃÂ© VÃÂLIDO ou INVÃÂLIDO.\n\n"
             "Dados:\n"
             "- Ativo: GBP/USD OTC\n"
-            "- DireÃ§Ã£o detectada: " + direction + "\n"
-            "- PadrÃ£o de vela: " + str(pattern) + "\n"
-            "- Volume vs mÃ©dia: " + vol_vs_media + "\n"
-            "- TendÃªncia M5: " + trend_label + "\n"
-            "- HorÃ¡rio BRT: " + brt_now + "\n"
-            "- SessÃ£o ativa: " + sessao_nome + "\n"
-            "- Ãltimas 5 velas (open, high, low, close):\n" + velas_str + "\n"
-            "Responda APENAS em JSON vÃ¡lido (sem markdown):\n"
-            '{"validar": true, "confianca": 80, "motivo": "explicaÃ§Ã£o", "risco": "BAIXO"}'
+            "- DireÃÂ§ÃÂ£o detectada: " + direction + "\n"
+            "- PadrÃÂ£o de vela: " + str(pattern) + "\n"
+            "- Volume vs mÃÂ©dia: " + vol_vs_media + "\n"
+            "- TendÃÂªncia M5: " + trend_label + "\n"
+            "- HorÃÂ¡rio BRT: " + brt_now + "\n"
+            "- SessÃÂ£o ativa: " + sessao_nome + "\n"
+            "- ÃÂltimas 5 velas (open, high, low, close):\n" + velas_str + "\n"
+            "Responda APENAS em JSON vÃÂ¡lido (sem markdown):\n"
+            '{"validar": true, "confianca": 80, "motivo": "explicaÃÂ§ÃÂ£o", "risco": "BAIXO"}'
         )
         client_ia = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
         msg = client_ia.messages.create(
@@ -829,12 +831,12 @@ def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
         valido    = bool(res.get("validar", False))
         confianca = int(res.get("confianca", 0))
         motivo    = str(res.get("motivo", ""))
-        risco     = str(res.get("risco", "MÃDIO"))
-        print("[Claude] validar=" + str(valido) + " confianÃ§a=" + str(confianca) + "% risco=" + risco)
+        risco     = str(res.get("risco", "MÃÂDIO"))
+        print("[Claude] validar=" + str(valido) + " confianÃÂ§a=" + str(confianca) + "% risco=" + risco)
         return valido, confianca, motivo, risco
     except Exception as e:
         print("[Claude] Erro: " + str(e))
-        return True, 65, "Erro na API, sinal liberado", "MÃDIO"
+        return True, 65, "Erro na API, sinal liberado", "MÃÂDIO"
 
 
 
@@ -940,10 +942,124 @@ def send_signal_to_vips(signal_text):
     return sent
 
 
+
+
+# ---------------------------------------------------------------------------
+# BOT-N7: Análise de Pavios (Wicks) e Momentum
+# ---------------------------------------------------------------------------
+
+def analyze_wicks(candles):
+    """
+    Analisa pavios das últimas 3 velas.
+    Retorna (wick_direction, wick_label, confidence_bonus)
+      wick_direction: 'CALL', 'PUT' ou None
+      wick_label: descrição do pavio detectado
+      confidence_bonus: bônus de confiança (0, 15 ou 20)
+    """
+    closed = [c for c in candles if c["is_closed"]]
+    if len(closed) < 3:
+        return None, None, 0
+
+    results = []
+    for candle in closed[-3:]:
+        o = candle["open"]
+        h = candle["high"]
+        l = candle["low"]
+        c_close = candle["close"]
+
+        body = abs(c_close - o)
+        full_range = h - l
+        if full_range == 0 or body == 0:
+            results.append((None, None, 0))
+            continue
+
+        lower_wick = min(o, c_close) - l
+        upper_wick = h - max(o, c_close)
+
+        # Pavio inferior >= 2.5x corpo → rejeição de baixa → CALL
+        if lower_wick >= 2.5 * body:
+            results.append(("CALL", "Rejeição forte de baixa", 15))
+        # Pavio superior >= 2.5x corpo → rejeição de alta → PUT
+        elif upper_wick >= 2.5 * body:
+            results.append(("PUT", "Rejeição forte de alta", 15))
+        # Fakeout: pavio grande mas corpo na direção oposta (manipulação)
+        elif upper_wick >= 1.5 * body and c_close < o:
+            # Preço subiu mas fechou abaixo → armadilha de alta → PUT
+            results.append(("PUT", "Fakeout institucional", 20))
+        elif lower_wick >= 1.5 * body and c_close > o:
+            # Preço caiu mas fechou acima → armadilha de baixa → CALL
+            results.append(("CALL", "Fakeout institucional", 20))
+        else:
+            results.append((None, None, 0))
+
+    # Retorna o sinal mais recente que foi detectado
+    for direction, label, bonus in reversed(results):
+        if direction is not None:
+            return direction, label, bonus
+    return None, None, 0
+
+
+def analyze_momentum(candles):
+    """
+    Analisa momentum das últimas 5 velas.
+    Retorna (momentum_direction, momentum_label, confidence_bonus)
+      momentum_direction: 'CALL', 'PUT' ou None
+      momentum_label: descrição do momentum
+      confidence_bonus: bônus de confiança
+    """
+    closed = [c for c in candles if c["is_closed"]]
+    if len(closed) < 5:
+        return None, None, 0
+
+    last5 = closed[-5:]
+    bodies = [abs(c["close"] - c["open"]) for c in last5]
+    closes = [c["close"] for c in last5]
+    opens_ = [c["open"] for c in last5]
+
+    # Doji na última vela?
+    last = last5[-1]
+    full_range = last["high"] - last["low"]
+    last_body = bodies[-1]
+    is_doji = (full_range > 0) and (last_body / full_range < 0.10)
+
+    # Direção predominante das 3 velas antes do doji
+    bull_count = sum(1 for i in range(2) if closes[i] > opens_[i])
+    bear_count = sum(1 for i in range(2) if closes[i] < opens_[i])
+
+    if is_doji and bull_count >= 2:
+        # Doji após 2+ altas → pausa antes de reversão → PUT
+        return "PUT", "Doji de exaustão altista", 15
+    if is_doji and bear_count >= 2:
+        # Doji após 2+ baixas → pausa antes de reversão → CALL
+        return "CALL", "Doji de exaustão baixista", 15
+
+    # Exaustão: corpos decrescentes consecutivos (momentum caindo)
+    decreasing = sum(1 for i in range(1, 5) if bodies[i] < bodies[i-1])
+    increasing = sum(1 for i in range(1, 5) if bodies[i] > bodies[i-1])
+
+    if decreasing >= 3:
+        # Momentum caindo → reversão iminente
+        # Verifica direção predominante para saber para onde vai reverter
+        bull_prev = sum(1 for i in range(4) if closes[i] > opens_[i])
+        bear_prev = sum(1 for i in range(4) if closes[i] < opens_[i])
+        if bull_prev >= 3:
+            return "PUT", "Exaustão de alta (reversão)", 15
+        elif bear_prev >= 3:
+            return "CALL", "Exaustão de baixa (reversão)", 15
+        return None, "Exaustão sem direção clara", 0
+
+    if increasing >= 3:
+        # Momentum crescendo → confirma tendência atual
+        last_dir = "CALL" if closes[-1] > opens_[-1] else "PUT"
+        return last_dir, "Aceleração de tendência", 10
+
+    return None, None, 0
+
+
 def signal_loop():
     global last_signal_time, current_bet
     global session_signals, session_notified, session_ended
-    last_vip_check = 0.0  # BOT-N5: controle de verificação VIP
+    last_vip_check = 0.0  # BOT-N5: controle de verificaÃ§Ã£o VIP
 
     print("Aguardando dados do WebSocket...")
     for _ in range(60):
@@ -964,12 +1080,12 @@ def signal_loop():
             ts  = now_brt().strftime("%H:%M:%S BRT")
             now = time.time()
 
-            # RelatÃÂ³rio diÃÂ¡rio
+            # RelatÃÂÃÂ³rio diÃÂÃÂ¡rio
             check_daily_report()
 
             if now < stop_until:
                 resume = datetime.fromtimestamp(stop_until, tz=timezone.utc) + BRT_OFFSET
-                print("[" + ts + "] Pausado atÃÂ© " + resume.strftime("%H:%M"))
+                print("[" + ts + "] Pausado atÃÂÃÂ© " + resume.strftime("%H:%M"))
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -985,11 +1101,11 @@ def signal_loop():
                     session_ended[i]    = False
                     session_signals[i]  = 0
                     send_telegram(msg_session_start(name, sh, sm, eh, em))
-                    print("[" + ts + "] SessÃÂ£o " + name + " aberta.")
+                    print("[" + ts + "] SessÃÂÃÂ£o " + name + " aberta.")
                 if not is_on and session_notified[i] and not session_ended[i]:
                     session_ended[i] = True
                     send_telegram(msg_session_end(name))
-                    print("[" + ts + "] SessÃÂ£o " + name + " encerrada.")
+                    print("[" + ts + "] SessÃÂÃÂ£o " + name + " encerrada.")
 
             if idx is None:
                 time.sleep(CHECK_INTERVAL)
@@ -1010,9 +1126,9 @@ def signal_loop():
 
             blocked, mins, return_time = check_news_block()
             if blocked:
-                msg_news = ("\u26a0\ufe0f NotÃÂ­cia importante em " + str(mins) + " minutos!\nPausando sinais por seguranÃÂ§a.\nRetorno em: " + return_time)
+                msg_news = ("\u26a0\ufe0f NotÃÂÃÂ­cia importante em " + str(mins) + " minutos!\nPausando sinais por seguranÃÂÃÂ§a.\nRetorno em: " + return_time)
                 send_telegram(msg_news)
-                print("[" + ts + "] NotÃÂ­cia em " + str(mins) + "min.")
+                print("[" + ts + "] NotÃÂÃÂ­cia em " + str(mins) + "min.")
                 time.sleep(max(60, mins * 60))
                 continue
 
@@ -1029,7 +1145,7 @@ def signal_loop():
 
             direction, pattern = detect_pattern(all_m1)
             if direction is None:
-                print("[" + ts + "] Nenhum padrÃÂ£o.")
+                print("[" + ts + "] Nenhum padrÃÂÃÂ£o.")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
@@ -1050,13 +1166,31 @@ def signal_loop():
                     time.sleep(CHECK_INTERVAL)
                     continue
 
-            # Calcula confianÃÂ§a (0-100)
+            # Calcula confianÃÂÃÂ§a (0-100)
+            # BOT-N7: Análise de Pavios e Momentum
+            wick_dir, wick_label, wick_bonus       = analyze_wicks(all_m1)
+            mom_dir,  mom_label,  mom_bonus        = analyze_momentum(all_m1)
+
+            # Se pavio ou momentum discordam do sinal principal, ignora
+            if wick_dir is not None and wick_dir != direction:
+                print("[N7] Pavio discorda do sinal (" + wick_dir + " vs " + direction + "). Ignorando.")
+                time.sleep(CHECK_INTERVAL)
+                continue
+            if mom_dir is not None and mom_dir != direction:
+                print("[N7] Momentum discorda do sinal (" + mom_dir + " vs " + direction + "). Ignorando.")
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            # Calcula confiança base + bônus N7
             confianca = 50
             if vol_strong: confianca += 25
             if trend is not None: confianca += 25
+            confianca += wick_bonus
+            confianca += mom_bonus
+            confianca = min(confianca, 100)
 
             ts2 = now_brt().strftime("%H:%M:%S BRT")
-            # BOT-N4: ValidaÃ§Ã£o via Claude API
+            # BOT-N4: ValidaÃÂ§ÃÂ£o via Claude API
             ia_valido, ia_confianca, ia_motivo, ia_risco = validate_with_claude(
                 direction, pattern, vol_strong, trend, m1_snap
             )
@@ -1065,11 +1199,11 @@ def signal_loop():
                 time.sleep(CHECK_INTERVAL)
                 continue
             if ia_confianca < 65:
-                print("[IA] ConfianÃ§a insuficiente: " + str(ia_confianca) + "%. Ignorando.")
+                print("[IA] ConfianÃÂ§a insuficiente: " + str(ia_confianca) + "%. Ignorando.")
                 time.sleep(CHECK_INTERVAL)
                 continue
 
-            signal_text = msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco, bet=current_bet)
+            signal_text = msg_signal(direction, vol_strong, trend, ia_confianca, ia_risco, bet=current_bet, wick_label=wick_label, mom_label=mom_label)
             ok  = send_telegram(signal_text)
             if ok:
                 last_signal_time     = time.time()
@@ -1089,6 +1223,8 @@ def signal_loop():
                     m5_confirmado=(trend is not None),
                     sessao=name,
                     validado_ia=True,
+                    wick_signal=wick_label,
+                    momentum_signal=mom_label,
                 )
             else:
                 print("[" + ts2 + "] Falha ao enviar sinal.")
@@ -1113,7 +1249,7 @@ def signal_loop():
 # ---------------------------------------------------------------------------
 
 def main():
-    print("Bot GBP/USD OTC BOT-N6 iniciado!")
+    print("Bot GBP/USD OTC BOT-N7 iniciado!")
     print("Features: WebSocket + Volume + MTF + Noticias + Stop Loss + Supabase Journaling + Claude AI + VIP + Anti-Martingale")
     init_supabase()
     t_m1 = threading.Thread(target=start_m1_ws, daemon=True)
