@@ -830,11 +830,13 @@ def handle_command(text, chat_id):
 
     elif text == "/ganhei":
         record_win()
-        send_to(chat_id,
-            "\U0001f4c8 <b>Vitoria registrada!</b> \u2705\n"
-            "\U0001f3c6 Anti-Martingale: sessao encerrada com lucro.\n"
-            "\U0001f4b0 Valor resetado: $" + str(BASE_BET_DEMO) + "\n"
-            "\U0001f305 Retorno amanha!")
+        msg_ganhei = (
+            "\U0001f3c6 <b>Vitoria registrada!</b>\n"
+            "Anti-Martingale: sessao encerrada com lucro.\n"
+            "\U0001f4b0 Proxima entrada: $" + str(BASE_BET_DEMO) + "\n"
+            "\U0001f4ca Placar hoje: " + str(session_wins) + " wins / " + str(session_losses) + " losses"
+        )
+        send_to(chat_id, msg_ganhei)
 
     elif text == "/placar":
         total = session_wins + session_losses
