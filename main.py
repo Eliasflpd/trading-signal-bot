@@ -327,11 +327,11 @@ def detect_pattern(candles):
     if big_bull_2 and doji_mid and is_bearish(o[4],c[4]) and c[4]<((o[2]+c[2])/2):
         return "PUT", "Estrela da Tarde"
     # --- Padroes simples de momentum ---
-    # Vela de momentum: corpo > 70% do range na direcao da tendencia
-    if rng4 > 0 and body4 / rng4 >= 0.70:
-        if is_bullish(o4, c4) and (two_bullish or is_bullish(o[3], c[3])):
+    # Vela de momentum: corpo > 50% do range na direcao da tendencia
+    if rng4 > 0 and body4 / rng4 >= 0.50:
+        if is_bullish(o4, c4) and is_bullish(o[3], c[3]):
             return "CALL", "Momentum Bullish"
-        if is_bearish(o4, c4) and (two_bearish or is_bearish(o[3], c[3])):
+        if is_bearish(o4, c4) and is_bearish(o[3], c[3]):
             return "PUT", "Momentum Bearish"
 
     # Sequencia de 3 velas na mesma direcao
@@ -348,6 +348,13 @@ def detect_pattern(candles):
     if c[3] < o[2] and c[4] < o[3]:
         return "PUT", "Fechamento Consecutivo Baixa"
 
+    # Direcional simples: vela atual com corpo >= 30% do range + anterior mesma direcao
+    if rng4 > 0 and body4 / rng4 >= 0.30:
+        if is_bullish(o4, c4) and is_bullish(o[3], c[3]):
+            return "CALL", "Direcional Alta"
+        if is_bearish(o4, c4) and is_bearish(o[3], c[3]):
+            return "PUT", "Direcional Baixa"
+
     return None, None
 
 
@@ -359,11 +366,16 @@ def volume_is_strong(candles):
     if len(candles) < 11:
         return False
     vols = [c["volume"] for c in candles[-11:-1]]
-    avg_vol = sum(vols) / len(vols)
-    if avg_vol <= 0:   return True   # Forex: volume nao disponivel
+    zeros = sum(1 for v in vols if v <= 0)
+    # Forex via Yahoo Finance: volume frequentemente zero/inconsistente
+    # Se maioria dos candles tem volume zero, dados sao irrelevantes -> OK
+    if zeros >= 5:
+        return True
+    avg_vol = sum(v for v in vols if v > 0) / max(len(vols) - zeros, 1)
+    if avg_vol <= 0:   return True
     last_vol = candles[-1]["volume"]
     if last_vol <= 0:  return True
-    return last_vol > avg_vol
+    return last_vol > avg_vol * 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -987,11 +999,12 @@ def check_asset_signal(asset_key):
 
     # Filtro 4: VWAP
     vwap_label, vwap_dist, vwap_bonus, vwap_ignore = get_vwap_signal_for(asset_key, direction, m1_snap)
-    if not vwap_ignore:
-        filtros_ok += 1
-        f_detalhes.append("VWAP:" + (vwap_label if vwap_label else "Neutro") + "+")
+    # VWAP ignorado (zona neutra ou sem dados) = neutro, nao penaliza
+    filtros_ok += 1
+    if vwap_ignore:
+        f_detalhes.append("VWAP:Neutro+")
     else:
-        f_detalhes.append("VWAP:Ignorado-")
+        f_detalhes.append("VWAP:" + (vwap_label if vwap_label else "Neutro") + "+")
 
     confianca = 50
     if vol_ok:              confianca += 25
@@ -1024,10 +1037,6 @@ def check_asset_signal(asset_key):
 
     if filtros_ok < 3:
         print("[" + ts + "] " + diag_linha + " | BLOQUEADO (faltou " + str(3 - filtros_ok) + " filtro(s))")
-        return False
-
-    if not ia_valido:
-        print("[" + ts + "] " + diag_linha + " | BLOQUEADO: IA invalidou — " + str(ia_motivo))
         return False
 
     print("[" + ts2 + "] " + diag_linha + " | >>> SINAL DISPARADO <<<")
