@@ -913,14 +913,16 @@ def check_asset_signal(asset_key):
     global last_signal_time, current_bet, daily_signals
     ts  = now_brt().strftime("%H:%M:%S BRT")
     now = time.time()
+    diag = "[DIAG " + asset_key + "]"
 
     if now - last_signal_time[asset_key] < COOLDOWN_SECS:
         remaining = int(COOLDOWN_SECS - (now - last_signal_time[asset_key]))
-        print("[" + ts + "] [" + asset_key + "] Cooldown: " + str(remaining) + "s")
+        print("[" + ts + "] " + diag + " Cooldown: " + str(remaining) + "s")
         return False
 
     blocked, mins, return_time = check_news_block(asset_key)
     if blocked:
+        print("[" + ts + "] " + diag + " BLOQUEADO: Noticia em " + str(mins) + "min")
         send_telegram("\u26a0\ufe0f Noticia (" + ASSETS[asset_key]["label"] + ") em "
                       + str(mins) + "min. Retorno: " + return_time)
         return False
@@ -930,76 +932,107 @@ def check_asset_signal(asset_key):
 
     closed_count = len([c for c in m1_snap if c["is_closed"]])
     if closed_count < 5:
-        print("[" + ts + "] [" + asset_key + "] Aguardando candles M1 (" + str(closed_count) + "/5).")
+        print("[" + ts + "] " + diag + " Aguardando candles M1 (" + str(closed_count) + "/5).")
         return False
 
     closed_m1 = [c for c in m1_snap if c["is_closed"]]
     all_m1    = closed_m1 + ([m1_snap[-1]] if m1_snap and not m1_snap[-1]["is_closed"] else [])
 
     direction, pattern = detect_pattern(all_m1)
+    padrao_str = str(pattern) if direction else "Nenhum"
     if direction is None:
-        print("[" + ts + "] [" + asset_key + "] Nenhum padrao.")
+        print("[" + ts + "] " + diag + " Padrao: Nenhum | BLOQUEADO: sem padrao de vela")
         return False
 
-    if not volume_is_strong(all_m1):
-        print("[" + ts + "] [" + asset_key + "] Volume fraco: " + str(pattern))
+    vol_ok = volume_is_strong(all_m1)
+    if not vol_ok:
+        print("[" + ts + "] " + diag + " Padrao: " + padrao_str + " (" + direction + ")"
+              + " | Volume: FRACO | BLOQUEADO: volume insuficiente")
         return False
 
     # --- Confluencia 5-de-8: padrao + volume obrigatorios + 3 de 6 opcionais ---
     filtros_ok = 0  # conta filtros opcionais confirmados
+    f_detalhes = []
 
     # Filtro 1: M5 trend
     trend = m5_trend_for(asset_key)
     if trend is not None:
         if direction == "CALL" and trend == "UP":
             filtros_ok += 1
+            f_detalhes.append("M5:Alta+")
         elif direction == "PUT" and trend == "DOWN":
             filtros_ok += 1
-        # trend discordante nao bloqueia, apenas nao conta
+            f_detalhes.append("M5:Baixa+")
+        else:
+            f_detalhes.append("M5:Contra-")
     else:
         filtros_ok += 1  # sem dados M5 = neutro, nao penaliza
+        f_detalhes.append("M5:SemDados+")
 
     # Filtro 2: Wick analysis
     wick_dir, wick_label, wick_bonus = analyze_wicks(all_m1)
     if wick_dir is None or wick_dir == direction:
-        filtros_ok += 1  # concorda ou neutro = ok
+        filtros_ok += 1
+        f_detalhes.append("Wick:" + (wick_label if wick_label else "Neutro") + "+")
+    else:
+        f_detalhes.append("Wick:Contra-")
 
     # Filtro 3: Momentum analysis
     mom_dir, mom_label, mom_bonus = analyze_momentum(all_m1)
     if mom_dir is None or mom_dir == direction:
-        filtros_ok += 1  # concorda ou neutro = ok
+        filtros_ok += 1
+        f_detalhes.append("Mom:" + (mom_label if mom_label else "Neutro") + "+")
+    else:
+        f_detalhes.append("Mom:Contra-")
 
     # Filtro 4: VWAP
     vwap_label, vwap_dist, vwap_bonus, vwap_ignore = get_vwap_signal_for(asset_key, direction, m1_snap)
     if not vwap_ignore:
-        filtros_ok += 1  # nao ignorado = ok
+        filtros_ok += 1
+        f_detalhes.append("VWAP:" + (vwap_label if vwap_label else "Neutro") + "+")
+    else:
+        f_detalhes.append("VWAP:Ignorado-")
 
     confianca = 50
-    if volume_is_strong(all_m1): confianca += 25
-    if trend is not None:        confianca += 15
+    if vol_ok:              confianca += 25
+    if trend is not None:   confianca += 15
     confianca += wick_bonus + mom_bonus
     confianca = min(confianca + vwap_bonus, 100)
 
     ts2 = now_brt().strftime("%H:%M:%S BRT")
     ia_valido, ia_confianca, ia_motivo, ia_risco = validate_with_claude(
-        direction, pattern, volume_is_strong(all_m1), trend, m1_snap)
+        direction, pattern, vol_ok, trend, m1_snap)
 
     # Filtro 5: IA valido
     if ia_valido:
         filtros_ok += 1
+        f_detalhes.append("IA:Valido+")
+    else:
+        f_detalhes.append("IA:Invalido(" + str(ia_motivo)[:20] + ")-")
 
     # Filtro 6: IA confianca >= 55
     if ia_confianca >= 55:
         filtros_ok += 1
+        f_detalhes.append("IA%:" + str(ia_confianca) + "+")
+    else:
+        f_detalhes.append("IA%:" + str(ia_confianca) + "<55-")
+
+    diag_linha = (diag + " Padrao: " + padrao_str + " (" + direction + ")"
+                  + " | Vol: OK"
+                  + " | " + " ".join(f_detalhes)
+                  + " | Score: " + str(filtros_ok) + "/6")
 
     if filtros_ok < 3:
-        print("[" + ts + "] [" + asset_key + "] Confluencia insuficiente: " + str(filtros_ok) + "/6 filtros ok.")
+        print("[" + ts + "] " + diag_linha + " | BLOQUEADO (faltou " + str(3 - filtros_ok) + " filtro(s))")
         return False
 
     if not ia_valido:
-        print("[IA] [" + asset_key + "] Invalidado: " + ia_motivo); return False
+        print("[" + ts + "] " + diag_linha + " | BLOQUEADO: IA invalidou — " + str(ia_motivo))
+        return False
 
-    signal_text = msg_signal(asset_key, direction, volume_is_strong(all_m1), trend,
+    print("[" + ts2 + "] " + diag_linha + " | >>> SINAL DISPARADO <<<")
+
+    signal_text = msg_signal(asset_key, direction, vol_ok, trend,
                              ia_confianca, ia_risco, bet=current_bet,
                              wick_label=wick_label, mom_label=mom_label, vwap_label=vwap_label)
 
@@ -1012,7 +1045,7 @@ def check_asset_signal(asset_key):
         vip_n = send_signal_to_vips(signal_text)
         if vip_n > 0: print("[VIP] " + str(vip_n) + " notificado(s).")
         log_signal(ativo=ASSETS[asset_key]["label"], direcao=direction, padrao=pattern,
-                   confianca=ia_confianca, volume_confirmado=volume_is_strong(all_m1),
+                   confianca=ia_confianca, volume_confirmado=vol_ok,
                    m5_confirmado=(trend is not None), sessao="24h", validado_ia=True,
                    wick_signal=wick_label, momentum_signal=mom_label,
                    vwap_signal=vwap_label, vwap_distance=vwap_dist)
