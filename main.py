@@ -326,6 +326,28 @@ def detect_pattern(candles):
     big_bull_2 = is_bullish(o[2],c[2]) and body_size(o[2],c[2])>0.5*candle_range(h[2],l[2])
     if big_bull_2 and doji_mid and is_bearish(o[4],c[4]) and c[4]<((o[2]+c[2])/2):
         return "PUT", "Estrela da Tarde"
+    # --- Padroes simples de momentum ---
+    # Vela de momentum: corpo > 70% do range na direcao da tendencia
+    if rng4 > 0 and body4 / rng4 >= 0.70:
+        if is_bullish(o4, c4) and (two_bullish or is_bullish(o[3], c[3])):
+            return "CALL", "Momentum Bullish"
+        if is_bearish(o4, c4) and (two_bearish or is_bearish(o[3], c[3])):
+            return "PUT", "Momentum Bearish"
+
+    # Sequencia de 3 velas na mesma direcao
+    three_bullish = is_bullish(o[2],c[2]) and is_bullish(o[3],c[3]) and is_bullish(o[4],c[4])
+    three_bearish = is_bearish(o[2],c[2]) and is_bearish(o[3],c[3]) and is_bearish(o[4],c[4])
+    if three_bullish:
+        return "CALL", "3 Velas Bullish"
+    if three_bearish:
+        return "PUT", "3 Velas Bearish"
+
+    # Fechamento acima/abaixo da abertura anterior por 2 velas consecutivas
+    if c[3] > o[2] and c[4] > o[3]:
+        return "CALL", "Fechamento Consecutivo Alta"
+    if c[3] < o[2] and c[4] < o[3]:
+        return "PUT", "Fechamento Consecutivo Baixa"
+
     return None, None
 
 
@@ -620,7 +642,7 @@ def analyze_momentum(candles):
     closes = [c["close"] for c in last5]; opens_=[c["open"] for c in last5]
     last=last5[-1]; fr=last["high"]-last["low"]; lb=bodies[-1]
     is_doji_l = (fr>0) and (lb/fr<0.10)
-    bc=sum(1 for i in range(2) if closes[i]>opens_[i]); be=sum(1 for i in range(2) if closes[i]<opens_[i])
+    bc=sum(1 for i in range(3) if closes[i]>opens_[i]); be=sum(1 for i in range(3) if closes[i]<opens_[i])
     if is_doji_l and bc>=2: return "PUT","Exaustao de alta (doji)",15
     if is_doji_l and be>=2: return "CALL","Exaustao de baixa (doji)",15
     avg=sum(bodies[:-1])/max(len(bodies[:-1]),1)
@@ -656,7 +678,7 @@ def get_vwap_signal_for(asset_key, direction, candles):
     if not closed: return None, 0.0, 0, False
     pp = closed[-1]["close"]
     dist = (pp - vv) / vv * 100.0; ad = abs(dist)
-    if ad <= 0.01: return "Neutro", round(dist,4), 0, False
+    if ad <= 0.05: return "Neutro", round(dist,4), 0, False
     db = 10 if ad>0.2 else (5 if ad>0.1 else 0)
     if direction=="CALL" and pp<vv: return "Abaixo (zona COMPRA)", round(dist,4), 10+db, False
     if direction=="PUT"  and pp>vv: return "Acima (zona VENDA)",   round(dist,4), 10+db, False
@@ -923,38 +945,59 @@ def check_asset_signal(asset_key):
         print("[" + ts + "] [" + asset_key + "] Volume fraco: " + str(pattern))
         return False
 
+    # --- Confluencia 5-de-8: padrao + volume obrigatorios + 3 de 6 opcionais ---
+    filtros_ok = 0  # conta filtros opcionais confirmados
+
+    # Filtro 1: M5 trend
     trend = m5_trend_for(asset_key)
     if trend is not None:
-        if direction == "CALL" and trend != "UP":
-            print("[" + ts + "] [" + asset_key + "] M5 discorda CALL."); return False
-        if direction == "PUT"  and trend != "DOWN":
-            print("[" + ts + "] [" + asset_key + "] M5 discorda PUT."); return False
+        if direction == "CALL" and trend == "UP":
+            filtros_ok += 1
+        elif direction == "PUT" and trend == "DOWN":
+            filtros_ok += 1
+        # trend discordante nao bloqueia, apenas nao conta
+    else:
+        filtros_ok += 1  # sem dados M5 = neutro, nao penaliza
 
+    # Filtro 2: Wick analysis
     wick_dir, wick_label, wick_bonus = analyze_wicks(all_m1)
-    mom_dir,  mom_label,  mom_bonus  = analyze_momentum(all_m1)
+    if wick_dir is None or wick_dir == direction:
+        filtros_ok += 1  # concorda ou neutro = ok
 
-    if wick_dir is not None and wick_dir != direction:
-        print("[" + ts + "] [" + asset_key + "] Pavio discorda."); return False
-    if mom_dir  is not None and mom_dir  != direction:
-        print("[" + ts + "] [" + asset_key + "] Momentum discorda."); return False
+    # Filtro 3: Momentum analysis
+    mom_dir, mom_label, mom_bonus = analyze_momentum(all_m1)
+    if mom_dir is None or mom_dir == direction:
+        filtros_ok += 1  # concorda ou neutro = ok
+
+    # Filtro 4: VWAP
+    vwap_label, vwap_dist, vwap_bonus, vwap_ignore = get_vwap_signal_for(asset_key, direction, m1_snap)
+    if not vwap_ignore:
+        filtros_ok += 1  # nao ignorado = ok
 
     confianca = 50
     if volume_is_strong(all_m1): confianca += 25
-    if trend is not None:        confianca += 25
+    if trend is not None:        confianca += 15
     confianca += wick_bonus + mom_bonus
-
-    vwap_label, vwap_dist, vwap_bonus, vwap_ignore = get_vwap_signal_for(asset_key, direction, m1_snap)
-    if vwap_ignore: return False
     confianca = min(confianca + vwap_bonus, 100)
 
     ts2 = now_brt().strftime("%H:%M:%S BRT")
     ia_valido, ia_confianca, ia_motivo, ia_risco = validate_with_claude(
         direction, pattern, volume_is_strong(all_m1), trend, m1_snap)
 
+    # Filtro 5: IA valido
+    if ia_valido:
+        filtros_ok += 1
+
+    # Filtro 6: IA confianca >= 55
+    if ia_confianca >= 55:
+        filtros_ok += 1
+
+    if filtros_ok < 3:
+        print("[" + ts + "] [" + asset_key + "] Confluencia insuficiente: " + str(filtros_ok) + "/6 filtros ok.")
+        return False
+
     if not ia_valido:
         print("[IA] [" + asset_key + "] Invalidado: " + ia_motivo); return False
-    if ia_confianca < 65:
-        print("[IA] [" + asset_key + "] Confianca baixa: " + str(ia_confianca) + "%"); return False
 
     signal_text = msg_signal(asset_key, direction, volume_is_strong(all_m1), trend,
                              ia_confianca, ia_risco, bet=current_bet,
