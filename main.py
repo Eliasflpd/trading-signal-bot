@@ -768,7 +768,7 @@ def handle_command(text, chat_id):
             "<b>Fontes:</b> Yahoo Finance (GBP/EUR/AUD)\n"
             "<b>Monitoramento:</b> 24h continuo \u267e\ufe0f\n\n"
             "<b>Max.:</b> 6 sinais/dia (reseta a meia-noite)\n"
-            "/status | /perdi | /ganhei | /placar | /relatorio\n"
+            "/sinal | /status | /perdi | /ganhei | /placar | /relatorio\n"
             "<b>Admin:</b> /addvip | /removevip | /listvip")
 
     elif text == "/status":
@@ -898,6 +898,14 @@ def handle_command(text, chat_id):
             exp = m.get("expira_em","?")[:10] if m.get("expira_em") else "?"
             lines.append("\u2022 " + (m.get("nome") or m["telegram_id"]) + " | ID: " + m["telegram_id"] + " | Expira: " + exp)
         send_to(chat_id, "\n".join(lines))
+
+    elif text == "/sinal":
+        send_to(chat_id, "\U0001f50d Analisando GBP/USD OTC...")
+        def _run_sinal():
+            sent = check_asset_signal("GBP")
+            if not sent:
+                send_to(chat_id, "\u26a0\ufe0f Nenhum sinal no momento.\nUse /status para mais detalhes.")
+        threading.Thread(target=_run_sinal, daemon=True).start()
 
 
 # ---------------------------------------------------------------------------
