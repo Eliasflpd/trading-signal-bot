@@ -31,7 +31,7 @@ MAX_LOSSES_AM  = 6
 
 # ---------------------------------------------------------------------------
 # Ativos
-# Todos os ativos: Yahoo Finance via requests HTTP (atualiza a cada 60s)
+# Todos os ativos: Yahoo Finance via requests HTTP (atualiza a cada 15s)
 # ---------------------------------------------------------------------------
 # Foco: apenas GBP/USD OTC — EUR e AUD desativados temporariamente
 ASSETS = {
@@ -278,7 +278,7 @@ def yahoo_update_loop(asset_key):
             print(tag + " Erro loop: " + str(e))
         with data_lock:
             has_data = len(asset_m1[asset_key]) > 0
-        time.sleep(60 if has_data else 30)
+        time.sleep(15)  # atualiza a cada 15s para capturar padroes GBP/USD no momento certo
 
 
 # ---------------------------------------------------------------------------
@@ -976,7 +976,7 @@ def check_asset_signal(asset_key):
               + " | Volume: FRACO | BLOQUEADO: volume insuficiente")
         return False
 
-    # --- Confluencia 5-de-8: padrao + volume obrigatorios + 3 de 6 opcionais ---
+    # --- Confluencia 4-de-8: padrao + volume obrigatorios + 2 de 6 opcionais ---
     filtros_ok = 0  # conta filtros opcionais confirmados
     f_detalhes = []
 
@@ -1049,8 +1049,8 @@ def check_asset_signal(asset_key):
                   + " | " + " ".join(f_detalhes)
                   + " | Score: " + str(filtros_ok) + "/6")
 
-    if filtros_ok < 3:
-        print("[" + ts + "] " + diag_linha + " | BLOQUEADO (faltou " + str(3 - filtros_ok) + " filtro(s))")
+    if filtros_ok < 2:
+        print("[" + ts + "] " + diag_linha + " | BLOQUEADO (faltou " + str(2 - filtros_ok) + " filtro(s))")
         return False
 
     print("[" + ts2 + "] " + diag_linha + " | >>> SINAL DISPARADO <<<")
