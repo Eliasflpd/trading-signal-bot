@@ -8,12 +8,12 @@ from datetime import datetime, timezone, timedelta
 from supabase import create_client, Client
 import anthropic
 
-# ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------h
 # Config
 # ---------------------------------------------------------------------------
 
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
+TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")h
 SUPABASE_URL       = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY       = os.environ.get("SUPABASE_KEY", "")
 ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -832,10 +832,10 @@ def handle_command(text, chat_id):
         record_win()
         msg_ganhei = (
             "\U0001f3c6 <b>Vitoria registrada!</b>\n"
-            "Anti-Martingale: sessao encerrada com lucro.\n"
-            "\U0001f4b0 Proxima entrada: $" + str(BASE_BET_DEMO) + "\n"
+            "Anti-Martingale: sessão encerrada com lucro.\n"
+            "\U0001f4b0 Próxima entrada: $" + str(BASE_BET_DEMO) + "\n"
             "\U0001f4ca Placar hoje: " + str(session_wins) + " wins / " + str(session_losses) + " losses\n"
-            "\u26a1 Aguarde o proximo sinal!"
+            "\u26a1 Aguarde o próximo sinal!"
         )
         send_to(chat_id, msg_ganhei)
 
