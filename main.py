@@ -377,7 +377,71 @@ def is_doji(o, c, h, l):
     return rng > 0 and body_size(o, c) / rng < 0.1
 
 
+# ---------------------------------------------------------------------------
+# HIERARQUIA DE FORCA DOS PADROES (1-10)
+# Padrao mais forte = mais confiavel = exige menos confluencia
+# Padrao mais fraco = exige mais confluencia para disparar sinal
+# ---------------------------------------------------------------------------
+PATTERN_STRENGTH = {
+    "Engolfo de Alta":              10,
+    "Engolfo de Baixa":             10,
+    "Pin Bar Bullish":               9,
+    "Pin Bar Bearish":               9,
+    "Estrela da Manha":              9,
+    "Estrela da Tarde":              9,
+    "Tweezer Bottom":                8,
+    "Tweezer Top":                   8,
+    "Martelo":                       8,
+    "Estrela Cadente":               8,
+    "Doji em Extremo Bullish":       7,
+    "Doji em Extremo Bearish":       7,
+    "Harami Bullish":                6,
+    "Harami Bearish":                6,
+    "3 Velas Bullish":               6,
+    "3 Velas Bearish":               6,
+    "Momentum Bullish":              5,
+    "Momentum Bearish":              5,
+    "Inside Bar Bullish":            4,
+    "Inside Bar Bearish":            4,
+    "Direcional Alta":               3,
+    "Direcional Baixa":              3,
+    "Fechamento Consecutivo Alta":   3,
+    "Fechamento Consecutivo Baixa":  3,
+}
+
+
+def get_pattern_strength(pattern):
+    """Retorna a forca do padrao (1-10). Default 5 para padroes nao listados."""
+    if pattern is None:
+        return 0
+    return PATTERN_STRENGTH.get(pattern, 5)
+
+
+def get_required_confluence(pattern):
+    """
+    Retorna o numero minimo de filtros (de 6) que o padrao precisa para disparar.
+    Padrao FORTE precisa de menos confluencia.
+    Padrao FRACO precisa de mais confluencia (protecao).
+    """
+    strength = get_pattern_strength(pattern)
+    if strength >= 8:   return 2  # padrao forte: 2/6 (atual)
+    if strength >= 5:   return 3  # padrao medio: 3/6
+    return 4                       # padrao fraco: 4/6
+
+
+def get_required_ia_confidence(pattern):
+    """Padrao fraco precisa de IA com maior confianca para nao furar protecao."""
+    strength = get_pattern_strength(pattern)
+    if strength >= 8:   return 55  # forte: aceita 55% (atual)
+    if strength >= 5:   return 60  # medio: 60%
+    return 65                       # fraco: 65%
+
+
 def detect_pattern(candles):
+    """
+    Detecta padroes de vela em ordem de forca (do mais forte ao mais fraco).
+    Retorna a primeira correspondencia encontrada — sempre prioriza o mais forte.
+    """
     if len(candles) < 5:
         return None, None
     last5 = candles[-5:]
@@ -386,33 +450,92 @@ def detect_pattern(candles):
     l = [c["low"]   for c in last5]
     c = [c["close"] for c in last5]
     o4, h4, l4, c4 = o[4], h[4], l[4], c[4]
+    o3, h3, l3, c3 = o[3], h[3], l[3], c[3]
     body4    = body_size(o4, c4)
+    body3    = body_size(o3, c3)
     lshadow4 = lower_shadow(o4, c4, l4)
     ushadow4 = upper_shadow(o4, c4, h4)
     rng4     = candle_range(h4, l4)
+    rng3     = candle_range(h3, l3)
     two_bearish = is_bearish(o[2], c[2]) and is_bearish(o[3], c[3])
     two_bullish = is_bullish(o[2], c[2]) and is_bullish(o[3], c[3])
     doji_mid    = is_doji(o[3], c[3], h[3], l[3])
-    if body4 > 0 and lshadow4 >= 2*body4 and ushadow4 <= 0.3*rng4 and two_bearish:
-        return "CALL", "Martelo"
+
+    # Contexto para Doji em Extremo (max/min das ultimas 5 velas disponiveis)
+    max_last5 = max(h)
+    min_last5 = min(l)
+    is_at_high = h4 >= max_last5 - (rng4 * 0.1)  # vela atual no topo do range
+    is_at_low  = l4 <= min_last5 + (rng4 * 0.1)  # vela atual no fundo do range
+
+    # ============================================================
+    # FORCA 10 — ENGOLFO (mais confiavel)
+    # ============================================================
     if is_bullish(o[4],c[4]) and is_bearish(o[3],c[3]) and c[4]>o[3] and o[4]<c[3]:
         return "CALL", "Engolfo de Alta"
+    if is_bearish(o[4],c[4]) and is_bullish(o[3],c[3]) and c[4]<o[3] and o[4]>c[3]:
+        return "PUT", "Engolfo de Baixa"
+
+    # ============================================================
+    # FORCA 9 — PIN BAR e ESTRELA DA MANHA/TARDE
+    # ============================================================
+    # Pin Bar Bullish: sombra inferior >= 2x corpo + sombra superior <= 25% do range
+    if rng4 > 0 and body4 > 0:
+        if lshadow4 >= 2 * body4 and ushadow4 <= 0.25 * rng4 and is_bullish(o4, c4):
+            return "CALL", "Pin Bar Bullish"
+        if ushadow4 >= 2 * body4 and lshadow4 <= 0.25 * rng4 and is_bearish(o4, c4):
+            return "PUT", "Pin Bar Bearish"
+
+    # Estrela da Manha
     big_bear_2 = is_bearish(o[2],c[2]) and body_size(o[2],c[2])>0.5*candle_range(h[2],l[2])
     if big_bear_2 and doji_mid and is_bullish(o[4],c[4]) and c[4]>((o[2]+c[2])/2):
         return "CALL", "Estrela da Manha"
-    if body4 > 0 and ushadow4 >= 2*body4 and lshadow4 <= 0.3*rng4 and two_bullish:
-        return "PUT", "Estrela Cadente"
-    if is_bearish(o[4],c[4]) and is_bullish(o[3],c[3]) and c[4]<o[3] and o[4]>c[3]:
-        return "PUT", "Engolfo de Baixa"
+    # Estrela da Tarde
     big_bull_2 = is_bullish(o[2],c[2]) and body_size(o[2],c[2])>0.5*candle_range(h[2],l[2])
     if big_bull_2 and doji_mid and is_bearish(o[4],c[4]) and c[4]<((o[2]+c[2])/2):
         return "PUT", "Estrela da Tarde"
-    if rng4 > 0 and body4 / rng4 >= 0.50:
-        if is_bullish(o4, c4) and is_bullish(o[3], c[3]):
-            return "CALL", "Momentum Bullish"
-        if is_bearish(o4, c4) and is_bearish(o[3], c[3]):
-            return "PUT", "Momentum Bearish"
 
+    # ============================================================
+    # FORCA 8 — TWEEZER, MARTELO, ESTRELA CADENTE
+    # ============================================================
+    # Tweezer Bottom: 2 velas com mesma minima (tolerancia 0.05% do preco)
+    if rng4 > 0 and rng3 > 0:
+        tolerancia = c4 * 0.0005  # 0.05% do preco atual
+        if abs(l4 - l3) <= tolerancia and is_bearish(o3, c3) and is_bullish(o4, c4):
+            return "CALL", "Tweezer Bottom"
+        if abs(h4 - h3) <= tolerancia and is_bullish(o3, c3) and is_bearish(o4, c4):
+            return "PUT", "Tweezer Top"
+
+    # Martelo (versao tradicional - precisa de 2 velas baixistas antes)
+    if body4 > 0 and lshadow4 >= 2*body4 and ushadow4 <= 0.3*rng4 and two_bearish:
+        return "CALL", "Martelo"
+    # Estrela Cadente
+    if body4 > 0 and ushadow4 >= 2*body4 and lshadow4 <= 0.3*rng4 and two_bullish:
+        return "PUT", "Estrela Cadente"
+
+    # ============================================================
+    # FORCA 7 — DOJI EM EXTREMO
+    # ============================================================
+    is_doji_atual = is_doji(o4, c4, h4, l4)
+    if is_doji_atual and is_at_low and two_bearish:
+        return "CALL", "Doji em Extremo Bullish"
+    if is_doji_atual and is_at_high and two_bullish:
+        return "PUT", "Doji em Extremo Bearish"
+
+    # ============================================================
+    # FORCA 6 — HARAMI e 3 VELAS
+    # ============================================================
+    # Harami Bullish: vela 3 grande baixista + vela 4 pequena bullish DENTRO do corpo
+    if body3 > 0 and body4 > 0 and body3 > 2 * body4:
+        # Harami Bullish: vela 3 baixista forte + vela 4 alta dentro do corpo
+        if is_bearish(o3, c3) and is_bullish(o4, c4):
+            if c4 < o3 and o4 > c3:  # corpo da 4 dentro do corpo da 3
+                return "CALL", "Harami Bullish"
+        # Harami Bearish: vela 3 altista forte + vela 4 baixa dentro do corpo
+        if is_bullish(o3, c3) and is_bearish(o4, c4):
+            if c4 > o3 and o4 < c3:  # corpo da 4 dentro do corpo da 3
+                return "PUT", "Harami Bearish"
+
+    # 3 Velas
     three_bullish = is_bullish(o[2],c[2]) and is_bullish(o[3],c[3]) and is_bullish(o[4],c[4])
     three_bearish = is_bearish(o[2],c[2]) and is_bearish(o[3],c[3]) and is_bearish(o[4],c[4])
     if three_bullish:
@@ -420,6 +543,31 @@ def detect_pattern(candles):
     if three_bearish:
         return "PUT", "3 Velas Bearish"
 
+    # ============================================================
+    # FORCA 5 — MOMENTUM
+    # ============================================================
+    if rng4 > 0 and body4 / rng4 >= 0.50:
+        if is_bullish(o4, c4) and is_bullish(o[3], c[3]):
+            return "CALL", "Momentum Bullish"
+        if is_bearish(o4, c4) and is_bearish(o[3], c[3]):
+            return "PUT", "Momentum Bearish"
+
+    # ============================================================
+    # FORCA 4 — INSIDE BAR (continuacao)
+    # ============================================================
+    # Inside Bar: vela 3 grande + vela 4 contida (high4 < high3 E low4 > low3)
+    # E vela 4 confirma direcao
+    if h4 < h3 and l4 > l3 and rng3 > 0 and body3 / rng3 >= 0.4:
+        # Continuacao bullish: vela 3 alta + inside bar + vela 4 fecha em alta
+        if is_bullish(o3, c3) and is_bullish(o4, c4):
+            return "CALL", "Inside Bar Bullish"
+        # Continuacao bearish: vela 3 baixa + inside bar + vela 4 fecha em baixa
+        if is_bearish(o3, c3) and is_bearish(o4, c4):
+            return "PUT", "Inside Bar Bearish"
+
+    # ============================================================
+    # FORCA 3 — FECHAMENTO CONSECUTIVO e DIRECIONAL (sinal mais fraco)
+    # ============================================================
     if c[3] > o[2] and c[4] > o[3]:
         return "CALL", "Fechamento Consecutivo Alta"
     if c[3] < o[2] and c[4] < o[3]:
@@ -1136,19 +1284,27 @@ def check_asset_signal(asset_key, forced=False):
     else:
         f_detalhes.append("IA:Invalido(" + str(ia_motivo)[:20] + ")-")
 
-    if ia_confianca >= 55:
+    # Confianca minima da IA varia conforme forca do padrao
+    ia_min_confianca = get_required_ia_confidence(pattern)
+    if ia_confianca >= ia_min_confianca:
         filtros_ok += 1
-        f_detalhes.append("IA%:" + str(ia_confianca) + "+")
+        f_detalhes.append("IA%:" + str(ia_confianca) + ">=" + str(ia_min_confianca) + "+")
     else:
-        f_detalhes.append("IA%:" + str(ia_confianca) + "<55-")
+        f_detalhes.append("IA%:" + str(ia_confianca) + "<" + str(ia_min_confianca) + "-")
 
-    diag_linha = (diag + " Padrao: " + padrao_str + " (" + direction + ")"
+    # Score minimo dinamico baseado na forca do padrao
+    forca_padrao = get_pattern_strength(pattern)
+    confluencia_min = get_required_confluence(pattern)
+
+    diag_linha = (diag + " Padrao: " + padrao_str + " [F" + str(forca_padrao) + "] (" + direction + ")"
                   + " | Vol: OK"
                   + " | " + " ".join(f_detalhes)
-                  + " | Score: " + str(filtros_ok) + "/6")
+                  + " | Score: " + str(filtros_ok) + "/6 (min " + str(confluencia_min) + ")")
 
-    if filtros_ok < 2:
-        print("[" + ts + "] " + diag_linha + " | BLOQUEADO (faltou " + str(2 - filtros_ok) + " filtro(s))")
+    if filtros_ok < confluencia_min:
+        print("[" + ts + "] " + diag_linha + " | BLOQUEADO (padrao F" + str(forca_padrao)
+              + " exige " + str(confluencia_min) + "/6, faltou "
+              + str(confluencia_min - filtros_ok) + " filtro(s))")
         return False
 
     print("[" + ts2 + "] " + diag_linha + " | >>> SINAL DISPARADO <<<")
