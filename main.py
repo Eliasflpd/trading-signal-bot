@@ -21,7 +21,7 @@ ANTHROPIC_API_KEY  = os.environ.get("ANTHROPIC_API_KEY", "")
 BRT_OFFSET = timedelta(hours=-3)
 
 COOLDOWN_SECS  = 300
-MAX_SIGNALS    = 6
+MAX_SIGNALS    = 12  # ALTERADO: 12 sinais/dia (4 por janela x 3 janelas)
 CHECK_INTERVAL = 30
 
 # Anti-Martingale
@@ -30,10 +30,80 @@ BASE_BET_REAL  = 10.0
 MAX_LOSSES_AM  = 6
 
 # ---------------------------------------------------------------------------
-# Ativos
-# Todos os ativos: Yahoo Finance via requests HTTP (atualiza a cada 15s)
+# JANELAS DE OPERACAO (Horario de Brasilia)
+# 3 janelas com 4 sinais cada = 12 sinais/dia
 # ---------------------------------------------------------------------------
-# Foco: apenas GBP/USD OTC — EUR e AUD desativados temporariamente
+TRADING_WINDOWS = [
+    {
+        "name": "ABERTURA_LONDRES",
+        "emoji": "🌅",
+        "start_hour": 5,   # 05:00 BRT
+        "start_min": 0,
+        "end_hour": 6,     # 06:00 BRT
+        "end_min": 0,
+        "max_signals": 4,
+        "label": "Abertura de Londres",
+    },
+    {
+        "name": "OVERLAP_LONDRES_NY",
+        "emoji": "⭐",
+        "start_hour": 10,  # 10:00 BRT
+        "start_min": 0,
+        "end_hour": 11,    # 11:00 BRT
+        "end_min": 0,
+        "max_signals": 4,
+        "label": "PICO Londres+NY",
+    },
+    {
+        "name": "POS_ALMOCO_NY",
+        "emoji": "🌆",
+        "start_hour": 15,  # 15:00 BRT
+        "start_min": 0,
+        "end_hour": 16,    # 16:00 BRT
+        "end_min": 0,
+        "max_signals": 4,
+        "label": "Pos-almoco NY",
+    },
+]
+
+# Contador de sinais por janela (resetado diariamente)
+window_signal_count = {w["name"]: 0 for w in TRADING_WINDOWS}
+
+
+def get_active_window():
+    """Retorna a janela ativa agora ou None se estiver fora de qualquer janela."""
+    now = now_brt()
+    cur_min = now.hour * 60 + now.minute
+    for w in TRADING_WINDOWS:
+        start = w["start_hour"] * 60 + w["start_min"]
+        end = w["end_hour"] * 60 + w["end_min"]
+        if start <= cur_min < end:
+            return w
+    return None
+
+
+def time_until_next_window():
+    """Retorna (segundos_ate_proxima_janela, nome_da_proxima) para sleep inteligente."""
+    now = now_brt()
+    cur_min = now.hour * 60 + now.minute
+    candidates = []
+    for w in TRADING_WINDOWS:
+        start = w["start_hour"] * 60 + w["start_min"]
+        if start > cur_min:
+            candidates.append((start - cur_min, w))
+    if candidates:
+        diff_min, w = min(candidates, key=lambda x: x[0])
+        return diff_min * 60 - now.second, w
+    # Nenhuma janela mais hoje — proxima e a primeira de amanha
+    first = TRADING_WINDOWS[0]
+    start = first["start_hour"] * 60 + first["start_min"]
+    minutes_until_midnight = (24 * 60) - cur_min
+    return (minutes_until_midnight + start) * 60 - now.second, first
+
+
+# ---------------------------------------------------------------------------
+# Ativos
+# ---------------------------------------------------------------------------
 ASSETS = {
     "GBP": {"label": "GBP/USD OTC", "source": "yahoo", "symbol": "GBPUSD=X"},
     # "EUR": {"label": "EUR/USD OTC", "source": "yahoo", "symbol": "EURUSD=X"},
@@ -47,7 +117,7 @@ ASSETS = {
 daily_signals    = 0
 daily_reset_date = ""
 daily_notified   = False
-last_signal_time = {"GBP": 0.0}  # EUR e AUD pausados
+last_signal_time = {"GBP": 0.0}
 bot_start_time   = time.time()
 last_update_id   = 0
 
@@ -58,13 +128,12 @@ stop_until         = 0.0
 current_bet        = BASE_BET_DEMO
 last_signal_id     = None
 
-asset_m1 = {"GBP": []}  # EUR e AUD pausados
-asset_m5 = {"GBP": []}  # EUR e AUD pausados
+asset_m1 = {"GBP": []}
+asset_m5 = {"GBP": []}
 data_lock = threading.Lock()
 
 asset_vwap = {
     "GBP": {"cum_tp_vol": 0.0, "cum_vol": 0.0, "value": None, "reset_hour": -1},
-    # EUR e AUD pausados
 }
 
 supa = None
@@ -73,10 +142,10 @@ NEWS_URL            = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 _news_cache         = None
 _news_cache_time    = 0
 _daily_report_sent_date = ""
+_window_open_notified = {w["name"]: "" for w in TRADING_WINDOWS}
 
 # ---------------------------------------------------------------------------
-# Supabase — com tratamento robusto de erros
-# Se a chave for invalida, o bot continua funcionando sem journaling
+# Supabase
 # ---------------------------------------------------------------------------
 
 def init_supabase():
@@ -86,7 +155,6 @@ def init_supabase():
         return
     try:
         client = create_client(SUPABASE_URL, SUPABASE_KEY)
-        # Testa a conexao com uma query simples para validar a chave
         client.table("trading_signals").select("id").limit(1).execute()
         supa = client
         print("[Supabase] Conexao validada com sucesso.")
@@ -100,7 +168,6 @@ def init_supabase():
 
 
 def _supa_call(fn):
-    """Executa uma chamada Supabase com tratamento de erro. Retorna None em caso de falha."""
     if supa is None:
         return None
     try:
@@ -187,7 +254,7 @@ def get_daily_stats():
 
 
 # ---------------------------------------------------------------------------
-# Utilities de tempo
+# Tempo
 # ---------------------------------------------------------------------------
 
 def now_brt():
@@ -200,7 +267,6 @@ YAHOO_HEADERS = {
 }
 
 def fetch_yahoo_chart(symbol, interval, range_val, max_len, tag):
-    """Busca candles direto da API Yahoo Finance v8 (sem yfinance)."""
     base_url = "https://query1.finance.yahoo.com/v8/finance/chart/" + symbol
     params = "interval=" + interval + "&range=" + range_val
     url = base_url + "?" + params
@@ -261,24 +327,39 @@ def yahoo_update_loop(asset_key):
     print(tag + " Loop iniciado para " + symbol)
     while True:
         try:
-            m1 = fetch_yahoo_candles_m1(symbol)
-            m5 = fetch_yahoo_candles_m5(symbol)
-            with data_lock:
-                if m1:
-                    asset_m1[asset_key] = m1
-                    print(tag + " M1 atualizado: " + str(len(m1)) + " candles")
-                else:
-                    print(tag + " M1 VAZIO")
-                if m5:
-                    asset_m5[asset_key] = m5
-                    print(tag + " M5 atualizado: " + str(len(m5)) + " candles")
-                else:
-                    print(tag + " M5 VAZIO")
+            # Otimizacao: so atualiza dados se estamos em janela ou perto dela (15 min antes)
+            now = now_brt()
+            cur_min = now.hour * 60 + now.minute
+            should_fetch = False
+            for w in TRADING_WINDOWS:
+                start = w["start_hour"] * 60 + w["start_min"]
+                end = w["end_hour"] * 60 + w["end_min"]
+                # Atualiza 15 min antes da janela ate o fim dela
+                if (start - 15) <= cur_min < end:
+                    should_fetch = True
+                    break
+
+            if should_fetch:
+                m1 = fetch_yahoo_candles_m1(symbol)
+                m5 = fetch_yahoo_candles_m5(symbol)
+                with data_lock:
+                    if m1:
+                        asset_m1[asset_key] = m1
+                        print(tag + " M1 atualizado: " + str(len(m1)) + " candles")
+                    else:
+                        print(tag + " M1 VAZIO")
+                    if m5:
+                        asset_m5[asset_key] = m5
+                        print(tag + " M5 atualizado: " + str(len(m5)) + " candles")
+                    else:
+                        print(tag + " M5 VAZIO")
+                time.sleep(15)
+            else:
+                # Fora de janela: sleep longo para economizar recursos
+                time.sleep(60)
         except Exception as e:
             print(tag + " Erro loop: " + str(e))
-        with data_lock:
-            has_data = len(asset_m1[asset_key]) > 0
-        time.sleep(15)  # atualiza a cada 15s para capturar padroes GBP/USD no momento certo
+            time.sleep(15)
 
 
 # ---------------------------------------------------------------------------
@@ -326,15 +407,12 @@ def detect_pattern(candles):
     big_bull_2 = is_bullish(o[2],c[2]) and body_size(o[2],c[2])>0.5*candle_range(h[2],l[2])
     if big_bull_2 and doji_mid and is_bearish(o[4],c[4]) and c[4]<((o[2]+c[2])/2):
         return "PUT", "Estrela da Tarde"
-    # --- Padroes simples de momentum ---
-    # Vela de momentum: corpo > 50% do range na direcao da tendencia
     if rng4 > 0 and body4 / rng4 >= 0.50:
         if is_bullish(o4, c4) and is_bullish(o[3], c[3]):
             return "CALL", "Momentum Bullish"
         if is_bearish(o4, c4) and is_bearish(o[3], c[3]):
             return "PUT", "Momentum Bearish"
 
-    # Sequencia de 3 velas na mesma direcao
     three_bullish = is_bullish(o[2],c[2]) and is_bullish(o[3],c[3]) and is_bullish(o[4],c[4])
     three_bearish = is_bearish(o[2],c[2]) and is_bearish(o[3],c[3]) and is_bearish(o[4],c[4])
     if three_bullish:
@@ -342,13 +420,11 @@ def detect_pattern(candles):
     if three_bearish:
         return "PUT", "3 Velas Bearish"
 
-    # Fechamento acima/abaixo da abertura anterior por 2 velas consecutivas
     if c[3] > o[2] and c[4] > o[3]:
         return "CALL", "Fechamento Consecutivo Alta"
     if c[3] < o[2] and c[4] < o[3]:
         return "PUT", "Fechamento Consecutivo Baixa"
 
-    # Direcional simples: vela atual com corpo >= 30% do range + anterior mesma direcao
     if rng4 > 0 and body4 / rng4 >= 0.30:
         if is_bullish(o4, c4) and is_bullish(o[3], c[3]):
             return "CALL", "Direcional Alta"
@@ -359,7 +435,7 @@ def detect_pattern(candles):
 
 
 # ---------------------------------------------------------------------------
-# Volume — fallback para dados com volume=0 (Yahoo/Yahoo Finance forex)
+# Volume
 # ---------------------------------------------------------------------------
 
 def volume_is_strong(candles):
@@ -367,8 +443,6 @@ def volume_is_strong(candles):
         return False
     vols = [c["volume"] for c in candles[-11:-1]]
     zeros = sum(1 for v in vols if v <= 0)
-    # Forex via Yahoo Finance: volume frequentemente zero/inconsistente
-    # Se maioria dos candles tem volume zero, dados sao irrelevantes -> OK
     if zeros >= 5:
         return True
     avg_vol = sum(v for v in vols if v > 0) / max(len(vols) - zeros, 1)
@@ -407,7 +481,7 @@ def m5_trend_for(asset_key):
 
 
 # ---------------------------------------------------------------------------
-# Noticias economicas
+# Noticias
 # ---------------------------------------------------------------------------
 
 def get_news():
@@ -500,7 +574,7 @@ def get_updates(offset=None):
 # ---------------------------------------------------------------------------
 
 def msg_signal(asset_key, direction, vol_strong, trend, ia_confianca=None, ia_risco=None,
-               bet=None, wick_label=None, mom_label=None, vwap_label=None):
+               bet=None, wick_label=None, mom_label=None, vwap_label=None, window_label=None):
     label     = ASSETS[asset_key]["label"]
     vol_icon  = "Alto \u2705" if vol_strong else "Baixo \u26a0\ufe0f"
     ia_linha  = ""
@@ -511,17 +585,18 @@ def msg_signal(asset_key, direction, vol_strong, trend, ia_confianca=None, ia_ri
     vwap_linha = ("\n\U0001f3e6 VWAP: " + vwap_label)    if vwap_label else ""
     wick_linha = ("\n\U0001f56f Pavio: " + wick_label + " \u2705") if wick_label else ""
     mom_linha  = ("\n\U0001f4c8 Momentum: " + mom_label + " \u2705") if mom_label else ""
+    win_linha  = ("\n\U0001f4cd Janela: " + window_label) if window_label else ""
     if direction == "CALL":
         ti = "Alta \u2705" if trend=="UP" else ("Baixa \u26a0\ufe0f" if trend=="DOWN" else "\u2014")
         return ("\U0001f7e2 <b>COMPRE \u2014 " + label + "</b>\n"
-                "\u23f1 Tempo: 1 minuto" + vwap_linha + wick_linha + mom_linha + ia_linha + "\n"
+                "\u23f1 Tempo: 1 minuto" + win_linha + vwap_linha + wick_linha + mom_linha + ia_linha + "\n"
                 "\U0001f4ca Volume: " + vol_icon + " | M5: " + ti + "\n"
                 "\u27a1\ufe0f Clique no botao VERDE\n"
                 "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha)
     else:
         ti = "Baixa \u2705" if trend=="DOWN" else ("Alta \u26a0\ufe0f" if trend=="UP" else "\u2014")
         return ("\U0001f534 <b>VENDA \u2014 " + label + "</b>\n"
-                "\u23f1 Tempo: 1 minuto" + vwap_linha + wick_linha + mom_linha + ia_linha + "\n"
+                "\u23f1 Tempo: 1 minuto" + win_linha + vwap_linha + wick_linha + mom_linha + ia_linha + "\n"
                 "\U0001f4ca Volume: " + vol_icon + " | M5: " + ti + "\n"
                 "\u27a1\ufe0f Clique no botao VERMELHO\n"
                 "\u26a1 \xdaLTIMO AVISO \u2014 20 segundos!" + bet_linha)
@@ -529,9 +604,21 @@ def msg_signal(asset_key, direction, vol_strong, trend, ia_confianca=None, ia_ri
 
 def msg_new_day(date_str):
     return ("\U0001f7e2 <b>Novo dia iniciado!</b>\n"
-            "Monitorando: GBP/USD OTC (foco total)\n"
-            "EUR e AUD: pausados para calibracao\n"
-            "Max. " + str(MAX_SIGNALS) + " sinais hoje.")
+            "Monitorando: GBP/USD OTC\n"
+            "EUR e AUD: pausados para calibracao\n\n"
+            "\U0001f4cd <b>3 Janelas de Operacao (BRT):</b>\n"
+            "\U0001f305 05h00-06h00 \u2014 Abertura Londres (4 sinais)\n"
+            "\u2b50 10h00-11h00 \u2014 PICO Londres+NY (4 sinais)\n"
+            "\U0001f306 15h00-16h00 \u2014 Pos-almoco NY (4 sinais)\n\n"
+            "Total: " + str(MAX_SIGNALS) + " sinais maximos hoje.")
+
+
+def msg_window_open(window):
+    return ("\U0001f6a8 <b>Janela ABERTA:</b> " + window["emoji"] + " " + window["label"] + "\n"
+            "\u23f1 Duracao: " + ("0" + str(window["start_hour"]))[-2:] + ":" + ("0" + str(window["start_min"]))[-2:]
+            + " \u2014 " + ("0" + str(window["end_hour"]))[-2:] + ":" + ("0" + str(window["end_min"]))[-2:] + " BRT\n"
+            "\U0001f3af Maximo nesta janela: " + str(window["max_signals"]) + " sinais\n"
+            "\U0001f50d Procurando confluencia agora...")
 
 
 # ---------------------------------------------------------------------------
@@ -583,7 +670,7 @@ def check_daily_report():
 
 
 # ---------------------------------------------------------------------------
-# BOT-N5: VIP
+# VIP
 # ---------------------------------------------------------------------------
 
 def get_vip_members():
@@ -623,7 +710,7 @@ def send_signal_to_vips(text):
 
 
 # ---------------------------------------------------------------------------
-# BOT-N7: Pavios e Momentum
+# Pavios e Momentum
 # ---------------------------------------------------------------------------
 
 def analyze_wicks(candles):
@@ -666,7 +753,7 @@ def analyze_momentum(candles):
 
 
 # ---------------------------------------------------------------------------
-# VWAP Institucional
+# VWAP
 # ---------------------------------------------------------------------------
 
 def update_vwap_for(asset_key, candles):
@@ -717,7 +804,7 @@ def get_current_vwap_for(asset_key):
 
 
 # ---------------------------------------------------------------------------
-# BOT-N4: Validacao Claude AI
+# Validacao Claude
 # ---------------------------------------------------------------------------
 
 def validate_with_claude(direction, pattern, vol_strong, trend, candles_m1):
@@ -763,17 +850,27 @@ def handle_command(text, chat_id):
 
     if text == "/start":
         send_to(chat_id,
-            "\U0001f44b Ola! Sou o <b>Bot Multi-Ativo BOT-N8</b>.\n\n"
-            "<b>Ativos:</b> GBP/USD OTC | EUR/USD OTC | AUD/USD OTC\n"
-            "<b>Fontes:</b> Yahoo Finance (GBP/EUR/AUD)\n"
-            "<b>Monitoramento:</b> 24h continuo \u267e\ufe0f\n\n"
-            "<b>Max.:</b> 6 sinais/dia (reseta a meia-noite)\n"
+            "\U0001f44b Ola! Sou o <b>Bot Multi-Ativo BOT-N9</b>.\n\n"
+            "<b>Ativo:</b> GBP/USD OTC (foco total)\n"
+            "<b>Fonte:</b> Yahoo Finance\n"
+            "<b>Operacao:</b> 3 Janelas Premium \U0001f3af\n\n"
+            "\U0001f305 05h00-06h00 \u2014 Abertura Londres\n"
+            "\u2b50 10h00-11h00 \u2014 PICO Londres+NY\n"
+            "\U0001f306 15h00-16h00 \u2014 Pos-almoco NY\n\n"
+            "<b>Max.:</b> 4 sinais por janela (12 totais/dia)\n\n"
             "/sinal | /status | /perdi | /ganhei | /placar | /relatorio\n"
             "<b>Admin:</b> /addvip | /removevip | /listvip")
 
     elif text == "/status":
-        brt_now   = now_brt()
-        sessao = "Ativa 24h \u2705 \u2022 " + str(daily_signals) + "/" + str(MAX_SIGNALS) + " sinais hoje"
+        brt_now = now_brt()
+        active = get_active_window()
+        if active:
+            sessao_lin = active["emoji"] + " <b>JANELA ATIVA:</b> " + active["label"] + " (" + str(window_signal_count[active["name"]]) + "/" + str(active["max_signals"]) + ")"
+        else:
+            secs, next_w = time_until_next_window()
+            mins = secs // 60
+            sessao_lin = "\U0001f4a4 Fora de janela. Proxima: " + next_w["emoji"] + " " + next_w["label"] + " em " + str(mins) + "min"
+
         up = timedelta(seconds=int(time.time()-bot_start_time))
         h_up = int(up.total_seconds()//3600); m_up = int((up.total_seconds()%3600)//60)
         paused = ""
@@ -782,37 +879,30 @@ def handle_command(text, chat_id):
             paused = "\n\U0001f6d1 Pausado ate " + resume.strftime("%H:%M")
         with data_lock:
             gbp_m1 = len([c for c in asset_m1["GBP"] if c["is_closed"]])
-        supabase_status = "Ativo \u2705" if supa is not None else "Desativado \u26a0\ufe0f (chave invalida)"
-        msg = ("<b>Status BOT-N8 Multi-Ativo</b>\n"
+        supabase_status = "Ativo \u2705" if supa is not None else "Desativado \u26a0\ufe0f"
+
+        contagem_janelas = "\n\n\U0001f4ca <b>Contagem por janela hoje:</b>"
+        for w in TRADING_WINDOWS:
+            contagem_janelas += "\n" + w["emoji"] + " " + w["label"] + ": " + str(window_signal_count[w["name"]]) + "/" + str(w["max_signals"])
+
+        msg = ("<b>Status BOT-N9 (3 Janelas)</b>\n"
                "Hora BRT: " + brt_now.strftime("%H:%M:%S") + "\n"
-               "Sessao: " + sessao + "\n"
+               + sessao_lin + "\n"
+               "Total hoje: " + str(daily_signals) + "/" + str(MAX_SIGNALS) + " sinais\n"
                "Perdas seguidas: " + str(consecutive_losses) + "/" + str(MAX_LOSSES_AM) + "\n"
                "\U0001f4b0 Proxima entrada: $" + str(current_bet) + "\n"
                "Uptime: " + str(h_up) + "h " + str(m_up) + "m"
                + paused + "\n"
-               "\n"
-               "\U0001f7e2 <b>Monitorando: GBP/USD OTC (foco total)</b>\n"
-               "\u23f8 EUR e AUD: pausados para calibracao\n"
-               "\n"
-               "\U0001f4ca Candles M1: GBP=" + str(gbp_m1) + "\n"
-               "\U0001f5c4 Supabase: " + supabase_status)
+               "\n\U0001f4ca Candles M1: GBP=" + str(gbp_m1) + "\n"
+               "\U0001f5c4 Supabase: " + supabase_status
+               + contagem_janelas)
         vip_list = list_vip_active()
-        vip_lines = "\n\U0001f451 <b>VIPs ativos:</b> " + str(len(vip_list))
+        vip_lines = "\n\n\U0001f451 <b>VIPs ativos:</b> " + str(len(vip_list))
         if vip_list:
             for v in sorted(vip_list, key=lambda x: x.get("expira_em",""))[:3]:
                 exp = v.get("expira_em","?")[:10] if v.get("expira_em") else "?"
                 vip_lines += "\n\u2022 " + (v.get("nome") or v["telegram_id"]) + " \u2014 " + exp
-        vwap_lines = "\n\n\U0001f4b9 <b>VWAP Institucional</b>"
-        for ak in ASSETS:
-            vv, pp = get_current_vwap_for(ak)
-            lbl = ASSETS[ak]["label"]
-            if vv and pp:
-                zona = "zona COMPRA" if pp < vv else "zona VENDA"
-                vwap_lines += "\n\u2022 " + lbl + ": " + str(round(vv,5)) + " | Preco=" + str(round(pp,5)) + " (" + zona + ")"
-            else:
-                with data_lock: cnt = len(asset_m1[ak])
-                vwap_lines += "\n\u2022 " + lbl + ": aguardando dados (" + str(cnt) + " candles)"
-        send_to(chat_id, msg + vip_lines + vwap_lines)
+        send_to(chat_id, msg + vip_lines)
 
     elif text == "/perdi":
         triggered, resume_time = record_loss()
@@ -832,10 +922,10 @@ def handle_command(text, chat_id):
         record_win()
         msg_ganhei = (
             "\U0001f3c6 <b>Vitoria registrada!</b>\n"
-            "Anti-Martingale: sessão encerrada com lucro.\n"
-            "\U0001f4b0 Próxima entrada: $" + str(BASE_BET_DEMO) + "\n"
+            "Anti-Martingale: sessao encerrada com lucro.\n"
+            "\U0001f4b0 Proxima entrada: $" + str(BASE_BET_DEMO) + "\n"
             "\U0001f4ca Placar hoje: " + str(session_wins) + " wins / " + str(session_losses) + " losses\n"
-            "\u26a1 Aguarde o próximo sinal!"
+            "\u26a1 Aguarde o proximo sinal!"
         )
         send_to(chat_id, msg_ganhei)
 
@@ -874,7 +964,7 @@ def handle_command(text, chat_id):
         except ValueError:
             send_to(chat_id, "Dias deve ser numero."); return
         if add_vip(tid, dias):
-            send_to(tid, "\U0001f389 Bem-vindo ao VIP!\nSinais de GBP/USD | EUR/USD | AUD/USD.\n\u2705 Acesso por " + str(dias) + " dias.")
+            send_to(tid, "\U0001f389 Bem-vindo ao VIP!\nSinais de GBP/USD OTC nas 3 janelas premium.\n\u2705 Acesso por " + str(dias) + " dias.")
             send_to(chat_id, "\u2705 VIP ativado: " + tid + " por " + str(dias) + " dias.")
         else:
             send_to(chat_id, "\u274c Erro ao ativar VIP (Supabase indisponivel).")
@@ -900,9 +990,15 @@ def handle_command(text, chat_id):
         send_to(chat_id, "\n".join(lines))
 
     elif text == "/sinal":
-        send_to(chat_id, "\U0001f50d Analisando GBP/USD OTC...")
+        active = get_active_window()
+        if not active:
+            secs, next_w = time_until_next_window()
+            mins = secs // 60
+            send_to(chat_id, "\u23f3 Fora de janela. Proxima: " + next_w["emoji"] + " " + next_w["label"] + " em " + str(mins) + "min.")
+            return
+        send_to(chat_id, "\U0001f50d Analisando GBP/USD OTC na janela " + active["emoji"] + " " + active["label"] + "...")
         def _run_sinal():
-            sent = check_asset_signal("GBP")
+            sent = check_asset_signal("GBP", forced=True)
             if not sent:
                 send_to(chat_id, "\u26a0\ufe0f Nenhum sinal no momento.\nUse /status para mais detalhes.")
         threading.Thread(target=_run_sinal, daemon=True).start()
@@ -931,15 +1027,25 @@ def polling_loop():
 
 
 # ---------------------------------------------------------------------------
-# Loop de sinais — multi-ativo
+# Loop de sinais
 # ---------------------------------------------------------------------------
 
-def check_asset_signal(asset_key):
-    """Verifica e envia sinal para um ativo. Retorna True se sinal enviado."""
+def check_asset_signal(asset_key, forced=False):
+    """Verifica e envia sinal. Retorna True se sinal enviado.
+    forced=True ignora janela (usado pelo /sinal manual)."""
     global last_signal_time, current_bet, daily_signals
     ts  = now_brt().strftime("%H:%M:%S BRT")
     now = time.time()
     diag = "[DIAG " + asset_key + "]"
+
+    # Verifica janela ativa (exceto se forced)
+    active_window = get_active_window()
+    if not forced:
+        if active_window is None:
+            return False
+        if window_signal_count[active_window["name"]] >= active_window["max_signals"]:
+            print("[" + ts + "] " + diag + " Janela " + active_window["name"] + " ja atingiu limite (" + str(active_window["max_signals"]) + ")")
+            return False
 
     if now - last_signal_time[asset_key] < COOLDOWN_SECS:
         remaining = int(COOLDOWN_SECS - (now - last_signal_time[asset_key]))
@@ -976,11 +1082,9 @@ def check_asset_signal(asset_key):
               + " | Volume: FRACO | BLOQUEADO: volume insuficiente")
         return False
 
-    # --- Confluencia 4-de-8: padrao + volume obrigatorios + 2 de 6 opcionais ---
-    filtros_ok = 0  # conta filtros opcionais confirmados
+    filtros_ok = 0
     f_detalhes = []
 
-    # Filtro 1: M5 trend
     trend = m5_trend_for(asset_key)
     if trend is not None:
         if direction == "CALL" and trend == "UP":
@@ -992,10 +1096,9 @@ def check_asset_signal(asset_key):
         else:
             f_detalhes.append("M5:Contra-")
     else:
-        filtros_ok += 1  # sem dados M5 = neutro, nao penaliza
+        filtros_ok += 1
         f_detalhes.append("M5:SemDados+")
 
-    # Filtro 2: Wick analysis
     wick_dir, wick_label, wick_bonus = analyze_wicks(all_m1)
     if wick_dir is None or wick_dir == direction:
         filtros_ok += 1
@@ -1003,7 +1106,6 @@ def check_asset_signal(asset_key):
     else:
         f_detalhes.append("Wick:Contra-")
 
-    # Filtro 3: Momentum analysis
     mom_dir, mom_label, mom_bonus = analyze_momentum(all_m1)
     if mom_dir is None or mom_dir == direction:
         filtros_ok += 1
@@ -1011,9 +1113,7 @@ def check_asset_signal(asset_key):
     else:
         f_detalhes.append("Mom:Contra-")
 
-    # Filtro 4: VWAP
     vwap_label, vwap_dist, vwap_bonus, vwap_ignore = get_vwap_signal_for(asset_key, direction, m1_snap)
-    # VWAP ignorado (zona neutra ou sem dados) = neutro, nao penaliza
     filtros_ok += 1
     if vwap_ignore:
         f_detalhes.append("VWAP:Neutro+")
@@ -1030,14 +1130,12 @@ def check_asset_signal(asset_key):
     ia_valido, ia_confianca, ia_motivo, ia_risco = validate_with_claude(
         direction, pattern, vol_ok, trend, m1_snap)
 
-    # Filtro 5: IA valido
     if ia_valido:
         filtros_ok += 1
         f_detalhes.append("IA:Valido+")
     else:
         f_detalhes.append("IA:Invalido(" + str(ia_motivo)[:20] + ")-")
 
-    # Filtro 6: IA confianca >= 55
     if ia_confianca >= 55:
         filtros_ok += 1
         f_detalhes.append("IA%:" + str(ia_confianca) + "+")
@@ -1055,21 +1153,27 @@ def check_asset_signal(asset_key):
 
     print("[" + ts2 + "] " + diag_linha + " | >>> SINAL DISPARADO <<<")
 
+    window_label_text = (active_window["emoji"] + " " + active_window["label"]) if active_window else "Manual"
+
     signal_text = msg_signal(asset_key, direction, vol_ok, trend,
                              ia_confianca, ia_risco, bet=current_bet,
-                             wick_label=wick_label, mom_label=mom_label, vwap_label=vwap_label)
+                             wick_label=wick_label, mom_label=mom_label, vwap_label=vwap_label,
+                             window_label=window_label_text)
 
     if send_telegram(signal_text):
         last_signal_time[asset_key] = time.time()
         daily_signals += 1
-        print("[" + ts2 + "] [24h] [" + asset_key + "] " + direction
+        if active_window:
+            window_signal_count[active_window["name"]] += 1
+        sessao_log = active_window["name"] if active_window else "manual"
+        print("[" + ts2 + "] [" + sessao_log + "] [" + asset_key + "] " + direction
               + " (" + str(pattern) + ") #" + str(daily_signals)
               + " IA=" + str(ia_confianca) + "%")
         vip_n = send_signal_to_vips(signal_text)
         if vip_n > 0: print("[VIP] " + str(vip_n) + " notificado(s).")
         log_signal(ativo=ASSETS[asset_key]["label"], direcao=direction, padrao=pattern,
                    confianca=ia_confianca, volume_confirmado=vol_ok,
-                   m5_confirmado=(trend is not None), sessao="24h", validado_ia=True,
+                   m5_confirmado=(trend is not None), sessao=sessao_log, validado_ia=True,
                    wick_signal=wick_label, momentum_signal=mom_label,
                    vwap_signal=vwap_label, vwap_distance=vwap_dist)
         return True
@@ -1081,37 +1185,31 @@ def check_asset_signal(asset_key):
 def signal_loop():
     global daily_signals, daily_reset_date, daily_notified
 
-    print("Aguardando dados iniciais (max 120s por ativo)...")
-    for ak in ASSETS:
-        for _ in range(40):  # 40 * 3s = 120s
-            with data_lock:
-                ok = len([c for c in asset_m1[ak] if c["is_closed"]]) >= 5
-            if ok:
-                print("[Init] " + ak + " pronto.")
-                break
-            time.sleep(3)
-        else:
-            print("[Init] Timeout " + ak + " — prosseguindo.")
-
-    print("Loop de sinais iniciado (BOT-N8 Multi-Ativo 24h).")
+    print("Loop de sinais iniciado (BOT-N9 - 3 Janelas Premium).")
 
     while True:
         try:
             ts    = now_brt().strftime("%H:%M:%S BRT")
             now   = time.time()
             t_now = now_brt()
+            today_str = t_now.strftime("%d/%m/%Y")
 
             check_daily_report()
 
-            # Reset diario a meia-noite
-            today_str = t_now.strftime("%d/%m/%Y")
+            # Reset diario
             if daily_reset_date != today_str:
                 daily_signals    = 0
                 daily_notified   = False
                 daily_reset_date = today_str
-                print("[" + ts + "] Novo dia: contagem de sinais resetada.")
+                # Reseta contagem de cada janela
+                for w in TRADING_WINDOWS:
+                    window_signal_count[w["name"]] = 0
+                # Reseta flags de notificacao de janela
+                for k in _window_open_notified:
+                    _window_open_notified[k] = ""
+                print("[" + ts + "] Novo dia: contagem de sinais e janelas resetadas.")
 
-            # Aviso de novo dia as 00:00
+            # Aviso de novo dia
             if t_now.hour == 0 and t_now.minute == 0 and not daily_notified:
                 daily_notified = True
                 send_telegram(msg_new_day(today_str))
@@ -1123,19 +1221,47 @@ def signal_loop():
                 time.sleep(CHECK_INTERVAL); continue
 
             if daily_signals >= MAX_SIGNALS:
-                print("[" + ts + "] Max sinais do dia atingido.")
-                time.sleep(CHECK_INTERVAL); continue
+                # Atingiu maximo do dia, sleep ate amanha
+                secs_to_midnight = ((24 - t_now.hour) * 3600) - (t_now.minute * 60) - t_now.second
+                print("[" + ts + "] Max diario atingido. Sleep " + str(secs_to_midnight // 60) + "min ate reset.")
+                time.sleep(min(secs_to_midnight + 5, 1800))
+                continue
 
+            # Verifica janela ativa
+            active = get_active_window()
+
+            if active is None:
+                # Fora de janela: sleep ate proxima
+                secs, next_w = time_until_next_window()
+                mins = secs // 60
+                print("[" + ts + "] Fora de janela. Proxima: " + next_w["emoji"] + " " + next_w["label"] + " em " + str(mins) + "min. Dormindo...")
+                # Sleep no maximo 5 min para reagir bem ao comando /status
+                time.sleep(min(secs, 300))
+                continue
+
+            # Janela ativa! Notifica abertura uma vez
+            if _window_open_notified[active["name"]] != today_str:
+                _window_open_notified[active["name"]] = today_str
+                send_telegram(msg_window_open(active))
+                print("[" + ts + "] Janela " + active["name"] + " ABERTA - aviso enviado.")
+
+            # Verifica se ja atingiu limite da janela
+            if window_signal_count[active["name"]] >= active["max_signals"]:
+                print("[" + ts + "] Janela " + active["name"] + " esgotada (" + str(active["max_signals"]) + " sinais). Aguardando proxima.")
+                time.sleep(CHECK_INTERVAL)
+                continue
+
+            # Cooldown geral
             all_in_cd = all(now - last_signal_time[ak] < COOLDOWN_SECS for ak in ASSETS)
             if all_in_cd:
                 min_r = min(int(COOLDOWN_SECS-(now-last_signal_time[ak])) for ak in ASSETS)
-                print("[" + ts + "] Todos em cooldown: " + str(min_r) + "s")
+                print("[" + ts + "] " + active["name"] + " - Cooldown: " + str(min_r) + "s")
                 time.sleep(CHECK_INTERVAL); continue
 
-            # Rotacao por ativo
+            # Tenta gerar sinal
             signal_sent = False
             for ak in ASSETS:
-                if daily_signals >= MAX_SIGNALS: break
+                if window_signal_count[active["name"]] >= active["max_signals"]: break
                 if check_asset_signal(ak):
                     signal_sent = True
                     time.sleep(30)
@@ -1155,17 +1281,18 @@ def signal_loop():
 
 def main():
     print("=" * 60)
-    print("Bot Multi-Ativo BOT-N8 iniciado!")
-    print("GBP/USD: Yahoo Finance | EUR/USD: Yahoo Finance | AUD/USD: Yahoo Finance")
+    print("Bot BOT-N9 iniciado! (3 Janelas Premium)")
+    print("GBP/USD OTC | Yahoo Finance")
+    print("Janelas: 05h-06h | 10h-11h | 15h-16h BRT")
+    print("Max: 4 sinais/janela = 12 sinais/dia")
     print("=" * 60)
     init_supabase()
 
-    # Yahoo Finance para todos os ativos (GBP, EUR, AUD)
-    for ak in ["GBP", "EUR", "AUD"]:
+    # Yahoo Finance apenas para GBP (EUR e AUD pausados)
+    for ak in ["GBP"]:
         threading.Thread(target=yahoo_update_loop, args=(ak,), daemon=True).start()
         time.sleep(1)
 
-    # Polling Telegram
     threading.Thread(target=polling_loop, daemon=True).start()
 
     signal_loop()
